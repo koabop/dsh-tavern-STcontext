@@ -118,8 +118,21 @@ test('sidebar, overlay and native settings reach all content in short and narrow
           assert.ok(metrics.bottom <= metrics.edge + 1, 'last section must fit inside the visible scroll area');
           assert.ok(metrics.scrollWidth <= metrics.width + 1, 'no horizontal overflow');
           await area.evaluate(element => { element.scrollTop = 0; });
+          const personaDescription = '姓名：林舟\n身份：旅行者';
+          await page.getByRole('textbox', { name: '玩家设定', exact: true }).fill(personaDescription);
           await page.getByRole('button', { name: '保存设置', exact: true }).click();
           await page.getByText('设置已保存', { exact: true }).waitFor();
+          assert.equal(data.settings.personaDescription, personaDescription);
+          await page.evaluate(() => window.remount());
+          await page.waitForFunction(() => document.querySelector('.stc-header-status')?.textContent === '配置就绪');
+          assert.equal(await page.getByRole('textbox', { name: '玩家设定', exact: true }).inputValue(), personaDescription);
+          if (process.env.STCONTEXT_SCREENSHOT_DIR && surface === 'settings') {
+            const section = page.getByRole('region', { name: '生成设置', exact: true });
+            const height = await section.evaluate(element => Math.ceil(element.getBoundingClientRect().height) + 180);
+            await page.setViewportSize({ width: viewport.width, height });
+            await section.screenshot({ path: join(process.env.STCONTEXT_SCREENSHOT_DIR, `persona-settings-${viewport.width}.png`) });
+            await page.setViewportSize(viewport);
+          }
           await page.getByRole('button', { name: '编辑预设', exact: true }).click();
           const editor = page.getByRole('region', { name: '预设编辑器' });
           await editor.getByRole('textbox', { name: '提示词内容', exact: true }).fill('修改后的叙事规则 {{user}}');

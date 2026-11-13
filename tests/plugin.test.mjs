@@ -117,13 +117,14 @@ test('capabilities, not fork API versions or method presence alone, control regi
 for (const reason of ['normal', 'regenerate', 'retry']) {
   test(`${reason} uses complete upstream materials and runs output regex once`, async () => {
     const f = fixture(); await importPreset(f);
+    await f.call('settings', { personaDescription: '自定义玩家设定 {{保持原样}}' });
     const config = await f.prepare();
     const output = await f.generate(async request => {
       assert.equal(request.provider, 'fixture'); assert.equal(request.model, 'story');
       assert.equal(request.reasoningEffort, 'high');
       const text = request.messages.map(m => m.content[0].text).join('\n');
       for (const value of [...materials.history.map(m => m.text), ...materials.context.map(m => m.text),
-        '测试角色与测试玩家', '输入处理后的状态', '"hp":10', '"inputCount":2', '本轮已处理输入', '额外指导']) {
+        '测试角色与测试玩家', '输入处理后的状态', '"hp":10', '"inputCount":2', '本轮已处理输入', '额外指导', '自定义玩家设定 {{保持原样}}']) {
         assert.equal(text.split(value).length - 1, 1, value + ' must occur once');
       }
       assert.ok(text.includes(reason === 'normal' ? 'normal-only' : 'regenerate-only'));
@@ -154,15 +155,26 @@ test('request preview reports the host policy while preset output regex stays ac
   }
 });
 
-test('prepared preset/model survive selection changes and removal until the next operation', async () => {
+test('prepared preset/model/persona survive selection changes and removal until the next operation', async () => {
   const f = fixture(); await importPreset(f);
+  await f.call('settings', { personaDescription: '原玩家设定' });
   const firstId = (await f.call('config')).activeId, frozen = JSON.parse(JSON.stringify(await f.prepare()));
   const next = structuredClone(preset); next.extensions.regex_scripts[0].replaceString = 'YY';
   await importPreset(f, next);
-  await f.call('settings', { model: { provider: 'later', model: 'next' } });
+  await f.call('settings', { model: { provider: 'later', model: 'next' }, personaDescription: '新玩家设定' });
   await f.call('remove', { id: firstId });
-  const old = await f.generate(async request => { assert.equal(request.model, 'story'); return { text: 'X' }; }, frozen);
-  const current = await f.generate(async request => { assert.equal(request.model, 'next'); return { text: 'X' }; }, await f.prepare());
+  const old = await f.generate(async request => {
+    assert.equal(request.model, 'story');
+    const text = request.messages.map(message => message.content[0].text).join('\n');
+    assert.ok(text.includes('原玩家设定')); assert.ok(!text.includes('新玩家设定'));
+    return { text: 'X' };
+  }, frozen);
+  const current = await f.generate(async request => {
+    assert.equal(request.model, 'next');
+    const text = request.messages.map(message => message.content[0].text).join('\n');
+    assert.ok(text.includes('新玩家设定')); assert.ok(!text.includes('原玩家设定'));
+    return { text: 'X' };
+  }, await f.prepare());
   assert.equal(old.text, 'XX'); assert.equal(current.text, 'YY');
   await assert.rejects(f.generate(() => assert.fail('no model request'), null), /冻结的预设配置/);
   assert.equal(f.requests, 2);

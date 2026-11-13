@@ -1,6 +1,6 @@
 {
   "name": "dsh-tavern-STcontext",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "private": true,
   "type": "module",
   "description": "导入 SillyTavern 预设，使用完整可见历史生成或重生成正文。",

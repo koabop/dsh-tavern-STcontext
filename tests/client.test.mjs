@@ -400,25 +400,51 @@ test('saved unavailable models stay visible instead of silently selecting anothe
   } finally { h.destroy(); }
 });
 
-test('preset import keeps unsaved model edits and saving preserves hidden sampling settings', async () => {
+test('preset import keeps unsaved model and persona edits and saving preserves hidden sampling settings', async () => {
   const sampling = { maxTokens: 2048, contextLimit: 32768, temperature: .7 };
+  const personaDescription = '姓名：林舟\n身份：旅行者';
   const h = harness({ initialSettings: sampling });
   try {
     await h.mount();
     await h.choose('插件正文模型', JSON.stringify({ provider: 'own', model: 'story' }));
     await h.choose('推理等级', 'high');
+    await h.field('玩家设定', personaDescription);
     await h.input(file(JSON.stringify(simplePreset)));
     assert.match(h.text(), /有未保存的更改/);
     assert.equal(h.selectValue('推理等级'), 'high');
+    assert.equal(h.fieldValue('玩家设定'), personaDescription);
     assert.equal(h.selectValue('请求模式'), undefined);
     assert.equal(h.numberInputs(), 0);
     await h.click('保存设置');
-    assert.deepEqual(h.saved.settings, { ...sampling, model: { provider: 'own', model: 'story', reasoningEffort: 'high' } });
+    assert.deepEqual(h.saved.settings, { ...sampling, personaDescription, model: { provider: 'own', model: 'story', reasoningEffort: 'high' } });
     const patch = h.calls.filter(call => call.name === 'settings').at(-1).input;
     for (const key of Object.keys(sampling)) assert.equal(Object.hasOwn(patch, key), false);
     assert.doesNotMatch(h.text(), /有未保存的更改/);
   } finally { h.destroy(); }
 });
+
+for (const surface of [false, true, 'settings']) {
+  test(`player persona can be loaded, saved and cleared in the ${surface || 'sidebar'} panel`, async () => {
+    const h = harness({ initialSettings: { personaDescription: '已保存的玩家设定' } });
+    try {
+      await h.mount(surface);
+      assert.equal(h.fieldValue('玩家设定'), '已保存的玩家设定');
+      assert.doesNotMatch(h.text(), /有未保存的更改/);
+      const personaDescription = '  姓名：林舟\n身份：旅行者\n';
+      await h.field('玩家设定', personaDescription);
+      assert.match(h.text(), /有未保存的更改/);
+      await h.click('保存设置');
+      assert.equal(h.saved.settings.personaDescription, personaDescription);
+      assert.equal(h.fieldValue('玩家设定'), personaDescription);
+      assert.doesNotMatch(h.text(), /有未保存的更改/);
+      await h.field('玩家设定', '');
+      await h.click('保存设置');
+      assert.equal(h.saved.settings.personaDescription, undefined);
+      assert.equal(h.fieldValue('玩家设定'), '');
+      assert.doesNotMatch(h.text(), /有未保存的更改/);
+    } finally { h.destroy(); }
+  });
+}
 
 test('reasoning selector stays visible and disabled for models without levels', async () => {
   const h = harness();

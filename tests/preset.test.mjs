@@ -50,6 +50,48 @@ test('disabled history marker is explicitly supplemented, never silently omits h
   assert.ok(result.request.messages.some(message => message.content === '开场白'));
   assert.ok(result.report.warnings.some(text => text.includes('补入完整历史')));
 });
+
+test('custom player persona fills its marker verbatim with the preset order and role', () => {
+  const doc = preset(), data = materials();
+  doc.prompts.push({ identifier: 'personaDescription', name: 'Persona Description', role: 'user', marker: true, content: 'unused marker content' });
+  doc.prompt_order[0].order.splice(2, 0, { identifier: 'personaDescription', enabled: true });
+  const personaDescription = '  玩家：旅行者\n{{user}} {{setvar::persona::changed}} <% throw Error("literal") %>\n';
+  const result = compilePreset(doc, data, { personaDescription });
+  const index = result.request.messages.findIndex(message => message.content === personaDescription);
+  assert.equal(index, 2);
+  assert.equal(result.request.messages[index].role, 'user');
+  assert.equal(result.request.messages[index - 1].content, data.cardContext);
+  assert.equal(result.request.messages.filter(message => message.content === personaDescription).length, 1);
+  assert.ok(!result.request.messages.some(message => message.content.includes('unused marker content')));
+  assert.ok(!result.report.warnings.some(text => text.includes('personaDescription')));
+  assert.deepEqual(doc.prompts.at(-1).content, 'unused marker content');
+});
+
+test('custom player persona is supplemented when its marker is absent or disabled', () => {
+  for (const disabled of [false, true]) {
+    const doc = preset(), personaDescription = '玩家是一名旅行者。';
+    if (disabled) {
+      doc.prompts.push({ identifier: 'personaDescription', marker: true });
+      doc.prompt_order[0].order.push({ identifier: 'personaDescription', enabled: false });
+    }
+    const result = compilePreset(doc, materials(), { personaDescription });
+    assert.deepEqual(result.request.messages[0], { role: 'system', content: personaDescription });
+    assert.equal(result.request.messages.filter(message => message.content === personaDescription).length, 1);
+    assert.ok(result.report.warnings.some(text => text.includes('补入：personaDescription')));
+  }
+});
+
+test('empty custom player persona keeps existing captured and legacy material behavior', () => {
+  for (const captured of [true, false]) {
+    const doc = preset(), data = materials();
+    if (!captured) delete data.cardContext;
+    data.persona.description = '宿主玩家设定';
+    const original = compilePreset(doc, data).request;
+    for (const personaDescription of ['', ' \n\t']) {
+      assert.deepEqual(compilePreset(doc, data, { personaDescription }).request, original);
+    }
+  }
+});
 test('input regex wrappers retain full inputs while destructive rules are skipped', () => {
   const doc = preset();
   doc.extensions.regex_scripts = [

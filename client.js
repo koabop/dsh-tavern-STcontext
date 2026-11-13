@@ -7,7 +7,7 @@ window.__ModuleLoader__.load({
       inject: ['tavernUi', 'slots'],
       apply(ctx) {
         const ui = ctx.tavernUi, call = (name, args = {}) => ui.callHost('dsh-tavern-stcontext/' + name, args);
-        const editableSettings = value => ({ model: value?.model || null });
+        const editableSettings = value => ({ model: value?.model || null, personaDescription: value?.personaDescription || '' });
         const formatBytes = bytes => {
           const unit = bytes >= 1024 * 1024 ? 1024 * 1024 : 1024;
           return Number((bytes / unit).toFixed(2)) + (unit === 1024 ? ' KiB' : ' MiB');
@@ -343,7 +343,7 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
                     field('条目名称', prompt.name, value => patchPrompt('name', value)),
                     check('启用此提示词', !!inOrder && inOrder.enabled !== false, value => enablePrompt(prompt.identifier, value)),
                     select('消息角色', prompt.role || 'system', [['system', 'System · 系统'], ['user', 'User · 用户'], ['assistant', 'Assistant · 助手']], value => patchPrompt('role', value)),
-                    isMarker ? h('p', { className: 'stc-message stc-notice' }, '材料占位项：内容由宿主提供。完整历史与必要材料始终保留，关闭占位项只会改变其插入位置。')
+                    isMarker ? h('p', { className: 'stc-message stc-notice' }, '材料占位项：内容来自宿主材料或插件设置中的“玩家设定”。完整历史与必要材料始终保留，关闭占位项只会改变其插入位置。')
                       : field('提示词内容', prompt.content, value => patchPrompt('content', value), { multiline: true, rows: 10 }),
                     !isMarker && select('注入位置', String(prompt.injection_position ?? 0), [['0', '相对位置 · 按列表顺序'], ['1', '聊天内 · 指定深度']], value => patchPrompt('injection_position', Number(value))),
                     !isMarker && Number(prompt.injection_position) === 1 && h('div', { className: 'stc-grid' },
@@ -503,8 +503,8 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
                 h('div', { className: 'stc-row' },
                   h('button', { className: 'stc-button stc-quiet', disabled: !selected || working, onClick: () => act(async () => { const value = await readChunks('preset/read', { id: selected.id }); download(value.name.replace(/\.json$/i, '') + '.json', value.text); }) }, '导出预设'),
                   h('button', { className: 'stc-button stc-quiet stc-danger', disabled: !selected || busy, onClick: () => discardThen(() => act(async () => { await call('remove', { id: selected.id }); await refresh(false); setReport(null); })) }, '移除')))),
-            h('section', { className: 'stc-card stc-config-card', 'aria-label': '模型设置' },
-              h('div', { className: 'stc-card-title' }, h('div', null, h('h3', null, '正文模型'), h('p', { className: 'stc-muted' }, '用于正文生成与重生成')), badge('独立配置')),
+            h('section', { className: 'stc-card stc-config-card', 'aria-label': '生成设置' },
+              h('div', { className: 'stc-card-title' }, h('div', null, h('h3', null, '生成设置'), h('p', { className: 'stc-muted' }, '用于正文生成与重生成')), badge('独立配置')),
               h('label', { className: 'stc-field' }, '插件正文模型',
                 h('select', { 'aria-label': '插件正文模型', className: 'stc-select', value: modelKey, disabled: busy || !config || modelsLoading,
                   onChange: event => setSettings({ ...settings, model: event.target.value ? JSON.parse(event.target.value) : null }) },
@@ -528,6 +528,11 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
               !modelsLoading && !modelOptions.length && message('暂无可选文本模型，请先在 DSH 配置模型服务商，再刷新列表。'),
               modelError && message(modelError, 'error', 'alert'),
               ...catalog.filter(group => group.error).map(group => h('p', { key: group.provider, className: 'stc-message stc-error', role: 'alert' }, group.providerName + '：' + group.error)),
+              h('label', { className: 'stc-field' }, '玩家设定',
+                h('textarea', { 'aria-label': '玩家设定', className: 'stc-select', rows: 5, value: settings.personaDescription || '', disabled: busy || !config,
+                  placeholder: '填写你扮演的玩家的身份、外貌、性格、背景等',
+                  onChange: event => setSettings({ ...settings, personaDescription: event.target.value }) })),
+              h('p', { className: 'stc-muted' }, '保存后按原文填入 Persona Description；留空不额外添加。预设未启用该占位项时会自动补入，宿主原有玩家材料仍保留。'),
               h('div', { className: 'stc-card-footer stc-row stc-between' }, h('span', { className: 'stc-muted', role: 'status' }, settingsDirty ? '有未保存的更改' : '设置对所有会话生效'),
                 h('button', { className: 'stc-button', disabled: busy || !config || reasoningLoading, onClick: () => act(async () => { await saveSettings(); setNotice('设置已保存'); }) }, '保存设置')))),
             renderEditor(),
@@ -535,7 +540,7 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
               h('h3', null, '正文生成'),
               h('p', { className: 'stc-muted' }, '先保存预设与模型设置，再在「设置 → DSH Tavern → 剧情」选择 STcontext 和「插件直接生成」。如需前台模型先查世界书，选择「前台检索后由插件生成」。本局设置可覆盖全局选择。'),
               h('p', { className: 'stc-muted' }, '使用宿主的发送、重生成、失败重试和停止按钮。生成进度及错误由宿主显示；提交后结算失败时，在宿主中重试结算。'),
-              h('p', { className: 'stc-muted' }, '预设与模型在操作开始时冻结；生成途中保存更改只影响下一次操作。'),
+              h('p', { className: 'stc-muted' }, '预设、模型与玩家设定在操作开始时冻结；生成途中保存更改只影响下一次操作。'),
               gameId ? h('div', { className: 'stc-actions' },
                 h('button', { className: 'stc-button stc-quiet', disabled: working, onClick: () => act(readRequest) }, '查看本次请求'))
                 : h('p', { className: 'stc-muted' }, '打开游戏后，通过侧栏「＋ → STcontext」或输入框上方的「STcontext」查看本次请求。')),

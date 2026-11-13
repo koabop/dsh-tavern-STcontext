@@ -16,6 +16,26 @@ async function upload(store, text, name = 'preset.json', options = {}) {
 function modernTavern(maxBytes = 256 * 1024 * 1024) {
   return Object.assign(fakeTavern(), { maxBytes, getPluginDataLimits() { return { maxBytes: this.maxBytes }; } });
 }
+
+test('player persona persists verbatim, survives unrelated saves and clears without losing settings', async () => {
+  const tavern = fakeTavern(), store = createPresetStore(tavern);
+  const personaDescription = '  姓名：林舟\n身份：旅行者 {{user}}\n';
+  await store.settings({ personaDescription, maxTokens: 2048 });
+  const reloaded = createPresetStore(tavern);
+  assert.equal((await reloaded.list()).settings.personaDescription, personaDescription);
+  await reloaded.settings({ temperature: .7 });
+  const expected = { personaDescription, maxTokens: 2048, temperature: .7 };
+  assert.deepEqual((await store.list()).settings, expected);
+  for (const invalid of [42, true, {}, []]) {
+    await assert.rejects(store.settings({ personaDescription: invalid, maxTokens: 1 }), /玩家设定必须是文本/);
+    assert.deepEqual((await store.list()).settings, expected);
+  }
+  for (const empty of ['', ' \n\t', null]) {
+    await store.settings({ personaDescription });
+    await store.settings({ personaDescription: empty });
+    assert.deepEqual((await reloaded.list()).settings, { maxTokens: 2048, temperature: .7 });
+  }
+});
 async function readAll(store, id, first, kind = 'read') {
   let info = first || await store[kind]({ id }), text = info.text;
   while (text.length < info.total) {
