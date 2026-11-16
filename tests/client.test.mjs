@@ -126,6 +126,27 @@ function harness({ hostReady = true, initialModel, initialSettings = {}, catalog
 }
 const file = (text, name = 'imported.json') => ({ name, size: Buffer.byteLength(text), text: async () => text });
 
+test('model role presets import, export and edit without silently changing the role', async () => {
+  const h = harness();
+  const document = structuredClone(simplePreset);
+  document.prompts.unshift({ identifier: 'model-prompt', name: '模型提示词', role: 'model', content: 'original' });
+  document.prompt_order[0].order.unshift({ identifier: 'model-prompt', enabled: true });
+  const text = JSON.stringify(document, null, 4);
+  try {
+    await h.mount('settings'); await h.input(file(text));
+    assert.equal(h.saved.presets.length, 1);
+    assert.equal((await h.host('export', { id: h.saved.activeId })).text, text);
+    await h.click('编辑预设');
+    assert.equal(h.fieldValue('消息角色'), 'model');
+    assert.match(h.text(), /Model · 助手/);
+    await h.field('提示词内容', 'edited');
+    await h.click('保存预设');
+    const saved = JSON.parse(decodePreset(h.saved.presets[0].data));
+    assert.deepEqual(saved.prompts[0], { ...document.prompts[0], content: 'edited' });
+    assert.equal((await h.host('config')).presets[0].summary.blockers, 0);
+  } finally { h.destroy(); }
+});
+
 test('helper editor follows nested folder enablement and preserves script data', async () => {
   const h = harness();
   const document = { ...simplePreset, extensions: { tavern_helper: { scripts: [null,

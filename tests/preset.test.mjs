@@ -33,6 +33,40 @@ test('import selects only the chat-completion order and rejects malformed refere
   doc.prompt_order[1].order.push({ identifier: 'missing', enabled: true });
   assert.throws(() => parsePreset(JSON.stringify(doc)), /不存在/);
 });
+test('model role entries outside the selected order import without changing the source', () => {
+  const doc = preset();
+  doc.prompts.push({ identifier: 'unused', role: 'model', content: 'unused prompt' });
+  doc.prompts.push({ identifier: 'disabled', role: 'model', content: 'disabled prompt' });
+  doc.prompt_order[0].order.push({ identifier: 'disabled', enabled: false });
+  const parsed = parsePreset(JSON.stringify(doc));
+  assert.deepEqual(parsed, doc);
+  assert.deepEqual(compilePreset(parsed, materials()).request, compilePreset(preset(), materials()).request);
+  assert.ok(!inspectPreset(parsed).diagnostics.some(item => item.path.endsWith('.role')));
+});
+
+test('model roles compile as assistant for ordered, depth and material prompts', () => {
+  const doc = preset();
+  doc.prompts[0].role = 'model';
+  doc.prompts[1].role = 'model';
+  doc.prompts.push({ identifier: 'depth', role: 'model', content: 'depth prompt', injection_position: 1, injection_depth: 0 });
+  doc.prompt_order[0].order.push({ identifier: 'depth', enabled: true });
+  const parsed = parsePreset(JSON.stringify(doc)), before = structuredClone(parsed), data = materials();
+  const result = compilePreset(parsed, data);
+  for (const content of [doc.prompts[0].content, data.cardContext, 'depth prompt']) {
+    assert.deepEqual(result.request.messages.find(message => message.content === content), { role: 'assistant', content });
+  }
+  assert.ok(!result.request.messages.some(message => message.role === 'model'));
+  assert.equal(result.report.diagnostics.filter(item => item.path.endsWith('.role') && item.severity === 'warning').length, 3);
+  assert.deepEqual(parsed, before);
+});
+
+test('supporting model aliases does not accept unknown or non-string prompt roles', () => {
+  for (const role of ['tool', 'developer', 'unknown', null, 1, {}, []]) {
+    const doc = preset(); doc.prompts[0].role = role;
+    assert.throws(() => parsePreset(JSON.stringify(doc)), /不支持的消息角色/);
+  }
+});
+
 test('all visible prose survives 40/80 boundaries; source macro text is never run', () => {
   const doc = preset();
   doc.extensions.regex_scripts = [rule('/^[\\s\\S]*$/g', '', { minDepth: 40, promptOnly: true })];

@@ -342,7 +342,8 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
                     h('p', { className: 'stc-meta' }, prompt.identifier),
                     field('条目名称', prompt.name, value => patchPrompt('name', value)),
                     check('启用此提示词', !!inOrder && inOrder.enabled !== false, value => enablePrompt(prompt.identifier, value)),
-                    select('消息角色', prompt.role || 'system', [['system', 'System · 系统'], ['user', 'User · 用户'], ['assistant', 'Assistant · 助手']], value => patchPrompt('role', value)),
+                    select('消息角色', prompt.role || 'system', [['system', 'System · 系统'], ['user', 'User · 用户'], ['assistant', 'Assistant · 助手'],
+                      ...(prompt.role === 'model' ? [['model', 'Model · 助手（兼容）']] : [])], value => patchPrompt('role', value)),
                     isMarker ? h('p', { className: 'stc-message stc-notice' }, '材料占位项：内容来自宿主材料或插件设置中的“玩家设定”。完整历史与必要材料始终保留，关闭占位项只会改变其插入位置。')
                       : field('提示词内容', prompt.content, value => patchPrompt('content', value), { multiline: true, rows: 10 }),
                     !isMarker && select('注入位置', String(prompt.injection_position ?? 0), [['0', '相对位置 · 按列表顺序'], ['1', '聊天内 · 指定深度']], value => patchPrompt('injection_position', Number(value))),
