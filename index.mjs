@@ -1,5 +1,7 @@
 import { createPresetStore } from './lib/store.mjs';
-import { inspectPreset } from './lib/preset.mjs';
+import { inspectPreset, digest } from './lib/preset.mjs';
+import { displayRegexes } from './lib/regex.mjs';
+import { createTurnMemory } from './lib/turn-memory.mjs';
 import { runCompiler } from './lib/worker-client.mjs';
 import { createDshGeneration, selectGenerationModel } from './lib/generation.mjs';
 import { listGenerationModels, readGenerationModelReasoning } from './lib/models.mjs';
@@ -15,6 +17,8 @@ const PROVIDER = 'st-context';
 export function apply(ctx) {
   const generateBody = createDshGeneration({ llm: ctx.llm, meter: ctx.get('tokenMeter'), protocolTransport: createProtocolTransport(ctx) });
   const store = createPresetStore(ctx.tavern), previews = new Map();
+  const memory = createTurnMemory(ctx.tavern);
+  const projectsDisplay = ctx.tavern.capabilities?.bodyProjection === 1;
   const capable = () => ctx.tavern.capabilities?.bodyGeneration === 1 && typeof ctx.tavern.bodyGenerator === 'function';
   const handle = (key, callback) => ctx.tavern.handle(PREFIX + '/' + key, callback);
   handle('config', async () => ({ ...(await store.list()), ...(await store.listHostPresets()), hostReady: capable(), generationReady: capable() }));
@@ -51,21 +55,36 @@ export function apply(ctx) {
     const active = restoreGenerationConfig(config);
     if (!active?.document || !active?.settings) throw new Error('宿主未提供冻结的预设配置，请重新生成本轮');
     selectGenerationModel(active.settings.model);
-    const compiled = await runCompiler('compile', { document: active.document, materials: compilerMaterials(materials), settings: active.settings }, { signal });
+    const input = compilerMaterials(materials);
+    const memoryWarnings = await memory.restore(input, digest(active.document), signal);
+    const compiled = await runCompiler('compile', { document: active.document, materials: input, settings: active.settings }, { signal });
     const report = { ...compiled.report, preset: active.name, presetDigest: compiled.presetDigest, historyMessages: compiled.historyMessages,
       operationId: materials.operationId, reason: materials.reason,
       ...(typeof materials.outputProcessing?.hostRegex === 'boolean'
         ? { outputProcessing: { hostRegex: materials.outputProcessing.hostRegex } } : {}) };
-    const json = JSON.stringify({ report, logicalMessages: compiled.logicalMessages, request: compiled.request }, null, 2);
+    report.warnings.push(...memoryWarnings);
+    if (!projectsDisplay) report.warnings.push('宿主缺少正文双通道接口，聊天将显示未美化的消息源文。');
+    if (compiled.scriptState && !memory.available) report.warnings.push('宿主缺少版本化楼层存储，当前预设的聊天脚本状态仅在本轮有效。');
+    const preview = () => JSON.stringify({ report, logicalMessages: compiled.logicalMessages, request: compiled.request }, null, 2);
     previews.delete(materials.gameId);
-    previews.set(materials.gameId, { json, report, createdAt: Date.now() });
+    const entry = { json: preview(), report, createdAt: Date.now() };
+    previews.set(materials.gameId, entry);
     while (previews.size > 3) previews.delete(previews.keys().next().value);
     const response = await generateBody({ request: compiled.request, signal });
     signal?.throwIfAborted();
-    const result = await runCompiler('output', { document: active.document, response, helperState: compiled.helperState,
+    const result = await runCompiler('output', { document: active.document, response, helperState: compiled.helperState, projectDisplay: false,
       toolNames: (compiled.request.tools || []).map(tool => tool.name) }, { signal });
     signal?.throwIfAborted();
-    return { text: result.text };
+    // Keep the host's saved model layer usable as the source for future depths.
+    // A rule targeting both channels is applied to the prompt later by the compiler.
+    const regexScripts = projectsDisplay ? displayRegexes(active.document) : [];
+    const warnings = await memory.stage(materials, compiled, result.sourceText, signal);
+    if (warnings.length) {
+      report.warnings.push(...warnings);
+      entry.json = preview();
+    }
+    signal?.throwIfAborted();
+    return { text: result.sourceText, ...(regexScripts.length ? { regexScripts } : {}) };
   }
   if (capable()) {
     ctx.tavern.bodyGenerator({ name: PROVIDER, title: 'STcontext', prepare, generate });

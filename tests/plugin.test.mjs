@@ -1,14 +1,55 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { apply, name } from '../index.mjs';
 import { materials, preset } from './fixtures/materials.mjs';
 import { restoreGenerationConfig } from '../lib/generation-config.mjs';
+import { applyRegexOnce } from '../lib/regex.mjs';
+
+function displayed(reply) {
+  return applyRegexOnce(reply.text, reply.regexScripts || [], { placement: 2, depth: 0, channel: 'display' }).text;
+}
+
+test('Lyra preserves the source for display, then switches from prose to summary at the next depth', {
+  skip: !process.env.STCONTEXT_LYRA_FIXTURE,
+}, async () => {
+  const f = fixture();
+  await importPreset(f, JSON.parse(await readFile(process.env.STCONTEXT_LYRA_FIXTURE, 'utf8')));
+  const config = await f.prepare();
+  const story = '她推开门，把信放到桌上。', summary = '她交出了信。';
+  const source = story + '\n<SUOT>向前走</SUOT>\n<scene>书房 - 清晨</scene>\n<details><summary>摘要</summary>\n' + summary + '\n</details>';
+  const saved = await f.generate(() => ({ text: source }), config);
+  assert.equal(saved.text, source);
+  assert.match(displayed(saved), /<script\b/i);
+  for (const depth of [9, 10]) {
+    const history = [{ role: 'assistant', text: saved.text, turn: 1 },
+      ...Array.from({ length: depth - 1 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: '楼层 ' + i }))];
+    await f.generate(request => {
+      const projected = request.messages.flatMap(message => message.content)
+        .filter(block => block.type === 'text').map(block => block.text).join('\n');
+      assert.equal(projected.includes(story), depth === 9);
+      assert.equal(projected.includes(summary), depth === 10);
+      assert.ok(!projected.includes('<SUOT>向前走</SUOT>'));
+      assert.ok(!projected.includes('<template id="raw-data">'));
+      return { text: '下一条回复' };
+    }, config, { ...materials, history });
+    const preview = await f.call('request', { gameId: 'test' });
+    assert.ok(preview.report.historyProjections.some(row => row.depth === depth && row.afterLength < row.beforeLength));
+  }
+});
+
+test('older hosts keep narrative sources clean when display projection is unavailable', async () => {
+  const f = fixture(1, 7, { capabilities: { bodyProjection: 0 } });
+  await importPreset(f);
+  assert.deepEqual(await f.generate(() => ({ text: 'X' }), await f.prepare()), { text: 'X' });
+  assert.ok((await f.call('request', { gameId: 'test' })).report.warnings.some(value => value.includes('未美化')));
+});
 
 function fixture(capability = 1, apiVersion = 7, sharedPresets = {}) {
   let saved, generator, respond, requests = 0;
   const handlers = new Map();
   const tavern = {
-    apiVersion, capabilities: { bodyGeneration: capability, ...sharedPresets.capabilities },
+    apiVersion, capabilities: { bodyGeneration: capability, bodyProjection: 1, ...sharedPresets.capabilities },
     ...sharedPresets.methods,
     getPluginDataLimits: () => ({ maxBytes: 256 * 1024 * 1024 }),
     readPluginData: async () => structuredClone(saved),
@@ -80,8 +121,8 @@ test('shared presets are referenced, read fresh for each preparation and frozen 
   source.extensions.regex_scripts.find(rule => rule.replaceString === 'XX').replaceString = 'YY';
   const newConfig = await f.prepare();
   assert.deepEqual(reads, [{ id }, { id }, { id }]);
-  assert.equal((await f.generate(async () => ({ text: 'X' }), oldConfig)).text, 'XX');
-  assert.equal((await f.generate(async () => ({ text: 'X' }), newConfig)).text, 'YY');
+  assert.equal(displayed(await f.generate(async () => ({ text: 'X' }), oldConfig)), 'XX');
+  assert.equal(displayed(await f.generate(async () => ({ text: 'X' }), newConfig)), 'YY');
   await f.call('select', { hostPreset: 'current' });
   await f.prepare();
   assert.deepEqual(reads.at(-1), { gameId: 'test' });
@@ -100,7 +141,7 @@ test('large presets cross the 2 MiB host snapshot boundary compressed and keep o
   await f.call('remove', { id: (await f.call('config')).activeId });
   for (const config of [frozen, restoreGenerationConfig(frozen)]) {
     const output = await f.generate(async () => ({ text: 'X' }), config);
-    assert.equal(output.text, 'XX');
+    assert.equal(displayed(output), 'XX');
   }
 });
 
@@ -132,7 +173,9 @@ for (const reason of ['normal', 'regenerate', 'retry']) {
       assert.ok(!text.includes('原始输入'));
       return { text: '<div>X</div>' };
     }, config, { ...materials, reason, guidance: '额外指导' });
-    assert.deepEqual(output, { text: '<div>XX</div>' });
+    assert.equal(output.text, '<div>X</div>');
+    assert.equal(displayed(output), '<div>XX</div>');
+    assert.equal(output.regexScripts[0].promptOnly, false);
     assert.equal(f.requests, 1);
     const preview = await f.call('request', { gameId: 'test' });
     assert.equal(preview.report.reason, reason);
@@ -146,7 +189,9 @@ test('request preview reports the host policy while preset output regex stays ac
   const config = await f.prepare();
   for (const hostRegex of [true, false, undefined]) {
     const input = { ...materials, ...(hostRegex === undefined ? {} : { outputProcessing: { hostRegex } }) };
-    assert.deepEqual(await f.generate(async () => ({ text: 'X' }), config, input), { text: 'XX' });
+    const reply = await f.generate(async () => ({ text: 'X' }), config, input);
+    assert.equal(reply.text, 'X');
+    assert.equal(displayed(reply), 'XX');
     const preview = await f.call('request', { gameId: materials.gameId });
     assert.equal(preview.report.outputProcessing?.hostRegex, hostRegex);
     const decoded = JSON.parse(preview.text);
@@ -175,7 +220,7 @@ test('prepared preset/model/persona survive selection changes and removal until 
     assert.ok(text.includes('新玩家设定')); assert.ok(!text.includes('原玩家设定'));
     return { text: 'X' };
   }, await f.prepare());
-  assert.equal(old.text, 'XX'); assert.equal(current.text, 'YY');
+  assert.equal(displayed(old), 'XX'); assert.equal(displayed(current), 'YY');
   await assert.rejects(f.generate(() => assert.fail('no model request'), null), /冻结的预设配置/);
   assert.equal(f.requests, 2);
 });
@@ -195,7 +240,7 @@ test('saving an edited preset changes the next preparation but not an ongoing ge
   const next = await f.generate(async request => {
     assert.ok(JSON.stringify(request.messages).includes('EDITED PROMPT')); return { text: 'X' };
   }, await f.prepare());
-  assert.equal(old.text, 'XX'); assert.equal(next.text, 'YY');
+  assert.equal(displayed(old), 'XX'); assert.equal(displayed(next), 'YY');
 });
 
 test('invalid selection/materials fail before dispatch; model failure never returns a candidate', async () => {
@@ -254,22 +299,22 @@ test('SPreset pipeline uses frozen hooks, previews the exact request, and return
   await importPreset(f, document);
   let sent;
   const output = await f.generate(async request => { sent = request; return { toolCalls: [{ id: 'one', name: 'story', arguments: { text: 'X' } }] }; }, config);
-  assert.equal(output.text, '<body>XX</body>');
+  assert.equal(output.text, '<body>X</body>');
+  assert.equal(displayed(output), '<body>XX</body>');
   assert.equal(f.requests, 1);
   const preview = JSON.parse((await f.call('request', { gameId: 'test' })).text);
   assert.deepEqual(preview.request.messages, sent.messages.map(m => ({ role: m.role, content: m.content[0].text })));
   assert.deepEqual(preview.request.tools, sent.tools);
 });
 
-test('SPreset failed scripts, lost materials and expanded request budgets never reach the model', async () => {
+test('SPreset failed scripts and expanded request budgets never reach the model', async () => {
   for (const script of ['() => { throw Error("hook failure"); }',
-    '({request}) => {request.messages=[{role:"user",content:"lost"}]; return request;}',
     '({request}) => {request.messages[0].content += "x".repeat(500000); return request;}']) {
     const f = fixture(), document = structuredClone(preset);
     document.extensions.SPreset = { FinalRequestProcessing: { enabled: true, script } };
     await importPreset(f, document);
     const config = await f.prepare();
-    await assert.rejects(f.generate(() => assert.fail('no model dispatch'), config), /hook failure|完整历史保护|超过模型窗口/);
+    await assert.rejects(f.generate(() => assert.fail('no model dispatch'), config), /hook failure|超过模型窗口/);
     assert.equal(f.requests, 0);
   }
 });
@@ -299,7 +344,7 @@ test('helper request/response interception survives the real worker boundary and
     assert.doesNotMatch(JSON.stringify(request), /STCONTEXT_MATERIAL_/);
     return { toolCalls: [{ name: request.tools[0].name, arguments: '{"body":"X"}' }] };
   }, config);
-  assert.equal(result.text, 'XX');
+  assert.equal(displayed(result), 'XX');
   assert.equal(f.requests, 1);
   const preview = await f.call('request', { gameId: 'test' });
   assert.equal(preview.report.protocol, 'spreset');

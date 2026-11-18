@@ -15,13 +15,14 @@ const output = (document, compiled, response) => processOutput({ document, respo
 const register = `SillyTavern.getContext().ToolManager.registerFunctionTool({name:'reply',description:'reply',
   parameters:{type:'object',properties:{content:{type:'string'}},required:['content']}, action:args=>args.content});`;
 
-test('bundled hook must not replace frozen history after the integrity check', () => {
+test('bundled hook can replace request history while the host retains the original', () => {
   const document = doc(`document.createElement('div');
     eventOn(tavern_events.CHAT_COMPLETION_PROMPT_READY, event => {
       for (const message of event.chat) message.content = message.content.replace('历史玩家输入', '被替换的历史');
     });`);
   const compiled = compile(document);
-  assert.ok(JSON.stringify(compiled.request.messages).includes('历史玩家输入'), 'original history disappeared from accepted request');
+  assert.ok(compiled.request.messages.some(message => message.content === '被替换的历史'));
+  assert.equal(materials.history[1].text, '历史玩家输入');
 });
 
 test('no-op bundled hook must preserve literal identity macros in history', () => {
@@ -83,11 +84,9 @@ test('ToolManager must reject schema-invalid arguments before action', () => {
   assert.throws(() => output(document, compiled, {toolCalls:[{name:'reply',arguments:'{"content":"tiny","count":"wrong"}'}]}), /参数|字段/);
 });
 
-test('bundled hooks cannot erase materials or mutate the host even if errors are caught', () => {
-  for (const mutation of ['event.chat.pop()', 'event.chat[0].content="replacement"', 'event.chat=[]']) {
-    assert.throws(() => compile(doc(`document.createElement('div');
-      eventOn(tavern_events.CHAT_COMPLETION_PROMPT_READY, event=>{${mutation}});`)), /材料|完整/);
-  }
+test('bundled hooks must produce a valid request and cannot mutate the host even if caught', () => {
+  assert.throws(() => compile(doc(`document.createElement('div');
+    eventOn(tavern_events.CHAT_COMPLETION_PROMPT_READY, event=>{event.chat=[]});`)), /消息|材料|完整/);
   assert.throws(() => compile(doc(`document.createElement('div');
     eventOn(tavern_events.CHAT_COMPLETION_PROMPT_READY, ()=>{try {setChatMessages([])} catch {}});`)), /受限助手环境/);
 });
@@ -140,9 +139,12 @@ test('ToolManager rejects schema changes and empty per-call results without drop
 
 test('bundled browser objects do not masquerade as promises or load external scripts', () => {
   compile(doc(`document.createElement('div'); eventOn(tavern_events.CHAT_COMPLETION_PROMPT_READY, async()=>{
-    await document.createElement('span'); await $('div');
+    const panel = await document.createElement('span'); await $('div');
+    panel.style.setProperty('--size', '80px');
+    document.body.append(panel);
+    if (panel.style.getPropertyValue('--size') !== '80px') throw Error('style');
   });`));
-  for (const method of ['appendChild', 'insertBefore']) assert.throws(() => compile(doc(`
+  for (const method of ['append', 'appendChild', 'insertBefore']) assert.throws(() => compile(doc(`
     const s=document.createElement('script');s.src='https://example.invalid/a.js';
     eventOn(tavern_events.CHAT_COMPLETION_PROMPT_READY,()=>{try {document.body.${method}(s,null)} catch {}});
   `)), /远程脚本/);

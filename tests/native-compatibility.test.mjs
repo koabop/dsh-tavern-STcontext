@@ -6,6 +6,15 @@ import { preset, materials as upstream } from './fixtures/materials.mjs';
 import { compilerMaterials } from '../lib/materials.mjs';
 import { createPresetStore } from '../lib/store.mjs';
 
+test('legacy identity tags expand in preset prose and remain literal inside captured chat', () => {
+  const data = compilerMaterials(upstream), doc = structuredClone(preset);
+  data.history[0].text = '<user> 和 <char>';
+  doc.prompts[1].content = '<USER> 和 <Char>';
+  const { request } = compilePreset(doc, data);
+  assert.ok(request.messages.some(message => message.content === '测试玩家 和 测试角色'));
+  assert.ok(request.messages.some(message => message.content === '<user> 和 <char>'));
+});
+
 test('chat macros use frozen visible history plus this input, without re-executing material macros', () => {
   const data = compilerMaterials(upstream), doc = structuredClone(preset);
   data.input.projected = '{{setvar::secret::changed}} 原样本轮输入';

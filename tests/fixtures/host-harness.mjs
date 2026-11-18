@@ -51,7 +51,7 @@ export async function runHostGeneration({ mode, presetText, stream, userText = '
     resolvePresetRegexScripts: async () => [presetRule, overriddenRule, contextRule] });
   let pluginData;
   const handlers = new Map();
-  apply({ get: () => undefined, tavern: { capabilities: { bodyGeneration: 1 }, handle: (name, callback) => handlers.set(name, callback),
+  apply({ get: () => undefined, tavern: { capabilities: { bodyGeneration: 1, bodyProjection: 1 }, handle: (name, callback) => handlers.set(name, callback),
     getPluginDataLimits: () => ({ maxBytes: 256 * 1024 * 1024 }),
     readPluginData: async () => copy(pluginData), savePluginData: async ({ data }) => { pluginData = copy(data); },
     bodyGenerator: entry => providers.register('dsh-tavern-STcontext', entry) },

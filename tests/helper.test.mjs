@@ -2,6 +2,8 @@ import { bundledHelper } from './fixtures/bundled-helper.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { compilePreset, inspectPreset, processOutput } from '../lib/preset.mjs';
 import { compilerMaterials } from '../lib/materials.mjs';
 import { runCompiler } from '../lib/worker-client.mjs';
@@ -103,11 +105,26 @@ test('network, DOM loaders, nested generation and host mutations are denied even
   ]) assert.throws(() => compile(doc(source)), /受限助手环境/);
 });
 
-test('helper transformations cannot erase host materials or modify frozen sampling/model', () => {
-  for (const body of ['r.messages=[]', 'r.model="other"', 'r.max_tokens=1', 'r.temperature=0', 'r.tool_choice="required"']) {
+test('helper transformations preserve the model, output budget and local transport constraints', () => {
+  for (const body of ['r.messages=[]', 'r.model="other"', 'r.max_tokens=1', 'r.tool_choice="required"', 'r.stream=true', 'r.chat_completion_source="other"']) {
     assert.throws(() => compile(doc(`eventOn(tavern_events.CHAT_COMPLETION_SETTINGS_READY,r=>{${body}});`)), /完整|冻结|强制工具/);
   }
   assert.throws(() => compile(doc('while(true){}')), /超时/);
+});
+
+test('direct UI handlers are skipped while mixed generation hooks still run', () => {
+  const document = doc(`document.querySelector('#options').addEventListener('click', () => generate({}));`,
+    `const ctx = SillyTavern.getContext();
+    eventOn(tavern_events.CHAT_COMPLETION_SETTINGS_READY, request => {
+      if (request.type !== 'normal' || request.stream !== false || !request.chat_completion_source) throw Error('missing envelope');
+      request.messages.push({role:'system',content:ctx.canPerformToolCalls() ? 'tools available' : 'plain text'});
+    });`);
+  const compiled = compile(document);
+  assert.equal(compiled.report.scripts[0].kind, 'ui-only');
+  assert.equal(compiled.request.messages.at(-1).content, 'tools available');
+  assert.equal(compiled.request.chat_completion_source, undefined);
+  document.function_calling = false;
+  assert.equal(compile(document).request.messages.at(-1).content, 'plain text');
 });
 
 test('event-only tool declarations still need an output formatter before a model dispatch', () => {
@@ -169,14 +186,48 @@ test('original Kunlun script works under a different name and fingerprint withou
     script.name = 'unrelated-name'; script.content += '\n// Different fingerprint, same script contract.\n';
   }
   const data = compilerMaterials(materials);
-  data.history.push({ role: 'assistant', text: '  {{target_length}} 【ToolCall引导】 <历史记录>\n原样保留  ' });
+  data.history.push({ role: 'assistant', text: '几步以后 {{target_length}} 原地停下。' });
   data.input.projected = '  中文😀\n最后输入  ';
   const compiled = compilePreset(document, data, settings);
   assert.equal(compiled.report.protocol, 'spreset');
   assert.ok(compiled.request.tools[0].description.includes(data.history.at(-1).text));
-  assert.ok(compiled.request.tools[0].description.includes(data.input.projected));
+  assert.ok(compiled.request.tools[0].description.includes(data.input.projected.trim()));
   const name = compiled.request.tools[0].name;
   assert.equal(output(document, compiled, { toolCalls: [{ name, arguments: '{"buffer_content":"正文"}' }] }).text, '正文');
+});
+
+test('original mixed helper and its panel compile tool and text deliveries independently', { skip: !process.env.STCONTEXT_WAVE_FIXTURE }, async () => {
+  const document = JSON.parse(await readFile(process.env.STCONTEXT_WAVE_FIXTURE, 'utf8'));
+  for (const script of document.extensions.tavern_helper.scripts) script.name = 'renamed helper';
+  const compiled = compile(document);
+  assert.ok(compiled.report.scripts.some(script => script.kind === 'ui-only'));
+  assert.ok(compiled.request.tools.find(tool => tool.name === 'wave_context_reference').description.includes(materials.input.text));
+  const response = { toolCalls: [{ id: 'reply', name: 'actual_content', arguments: '{"content":"交付的故事"}' }] };
+  assert.equal(output(document, compiled, response).text, '交付的故事');
+  document.function_calling = false;
+  const textMode = compile(document);
+  assert.ok(textMode.request.messages.some(message => message.content?.includes('<wave_delivery>')));
+  assert.equal(output(document, textMode, { text: '标记之前<wave_delivery>交付的故事</wave_delivery>标记之后' }).text, '交付的故事');
+});
+
+test('host iframe reads the original floor when a display-only panel expands it', {
+  skip: !process.env.STCONTEXT_HOST_REPO || !process.env.STCONTEXT_WAVE_FIXTURE,
+}, async () => {
+  const hostModule = name => import(pathToFileURL(resolve(process.env.STCONTEXT_HOST_REPO, 'tavern-plugin/lib/domain', name + '.js')).href);
+  const [{ projectPluginReply }, { replyProse }, { projectTavernHelperMessage }, { copyPluginRegexScripts }] = await Promise.all([
+    hostModule('reply-presentation'), hostModule('reply-prose'), hostModule('tavern-helper-context'), hostModule('st-contract-service'),
+  ]);
+  const document = JSON.parse(await readFile(process.env.STCONTEXT_WAVE_FIXTURE, 'utf8'));
+  const text = '<content>正文</content>\n<wave_options>1. 继续走。\n2. 等一等。</wave_options>';
+  const rules = copyPluginRegexScripts(document.extensions.regex_scripts.filter(rule => rule.markdownOnly)
+    .map(rule => ({ ...rule, promptOnly: false })));
+  const projection = projectPluginReply(text, { pluginRegexScripts: rules });
+  const row = replyProse(text, projection);
+  const floor = projectTavernHelperMessage({ ...row, role: 'assistant', turn: 2, swipeId: 0, swipes: [row.projectionText] }, 3);
+  assert.ok(projection.displayParts.some(part => part.kind === 'html'));
+  assert.ok(row.displayText.includes('getCurrentMessageId'));
+  assert.equal(floor.message, text);
+  assert.equal(row.text, text);
 });
 
 test('Meowssiah bootstrap compiles original tool history, required choice and signatures through generic SPreset', { skip: !process.env.STCONTEXT_COMPAT_FIXTURE }, async () => {
@@ -194,7 +245,7 @@ test('Meowssiah bootstrap compiles original tool history, required choice and si
   assert.ok(output(document, compiled, { toolCalls: [{ name: 'soliumbra_reply', arguments: '{"game_content":"测试正文"}' }] }).text.includes('测试正文'));
 });
 
-test('bundled UI + hook helper scripts run in sandbox with inert DOM, ToolManager and opaque host materials', () => {
+test('bundled UI + generation hooks transform a copy of history and decode the tool reply', () => {
   const document = doc(bundledHelper);
   document.prompts.push(
     { identifier: 'tool-switch', name: '🔧结构化输出开关', role: 'system', content: '启用工具[ANTI_ROUTE_TAG]' },
@@ -211,8 +262,8 @@ test('bundled UI + hook helper scripts run in sandbox with inert DOM, ToolManage
   const wire = JSON.stringify(compiled.request.messages);
   assert.doesNotMatch(wire, /ANTI_ROUTE_TAG/);
   assert.match(wire, /<!-- anti-route -->/);
-  assert.ok(wire.includes('包含敏感词的历史消息'));
-  assert.ok(!wire.includes('包含ㄇㄧㄣˇ ㄍㄢˇ ㄘˊ的历史消息'));
+  assert.ok(wire.includes('包含ㄇㄧㄣˇ ㄍㄢˇ ㄘˊ的历史消息'));
+  assert.equal(data.history.at(-1).text, '包含敏感词的历史消息');
   assert.equal(compiled.request.tools?.length, 1);
   assert.equal(compiled.request.tools[0].name, 'structured_reply');
 

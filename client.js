@@ -38,7 +38,8 @@ window.__ModuleLoader__.load({
           if (doc.prompts.some(item => item.injection_trigger !== undefined && (!Array.isArray(item.injection_trigger) || item.injection_trigger.some(value => typeof value !== 'string')))) throw new Error('injection_trigger 必须是字符串数组');
           if (doc.extensions !== undefined && (!doc.extensions || typeof doc.extensions !== 'object' || Array.isArray(doc.extensions))) throw new Error('extensions 必须是对象');
           const rules = doc.extensions?.regex_scripts;
-          if (rules !== undefined && (!Array.isArray(rules) || rules.some(rule => !rule || typeof rule !== 'object' || (rule.placement !== undefined && !Array.isArray(rule.placement))))) throw new Error('regex_scripts 格式无效');
+          if (rules !== undefined && (!Array.isArray(rules) || rules.some(rule => !rule || typeof rule !== 'object' ||
+            (rule.disabled !== true && rule.enabled !== false && rule.placement !== undefined && !Array.isArray(rule.placement))))) throw new Error('regex_scripts 格式无效');
           return doc;
         }
         function editorSnapshot(text) {
@@ -281,6 +282,7 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
             const inOrder = prompt && order.find(item => item.identifier === prompt.identifier);
             const regexes = Array.isArray(doc.extensions?.regex_scripts) ? doc.extensions.regex_scripts : [];
             const rule = regexes[editor.regexIndex];
+            const placements = Array.isArray(rule?.placement) ? rule.placement : [];
             const scripts = editor.tab === 'scripts' ? helperRows(doc.extensions?.tavern_helper?.scripts) : [];
             const button = (label, onClick, disabled = false, extra = {}) => h('button', { type: 'button', className: 'stc-button', disabled: busy || disabled, onClick, ...extra }, label);
             const field = (label, value, onChange, options = {}) => h('label', { className: 'stc-field' }, label,
@@ -355,7 +357,7 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
                     h('p', { className: 'stc-muted' }, '移出顺序后仍保留条目及扩展引用；勾选可重新加入。永久删除或编辑扩展请使用完整 JSON。'))
                     : h('p', { className: 'stc-muted' }, '选择左侧条目，或新增提示词。')),
                 editor.tab === 'regex' && h('div', { className: 'stc-editor-form' },
-                  h('p', { className: 'stc-muted' }, '编辑原生 extensions.regex_scripts。规则按列表顺序执行；历史正文不会重新执行输出正则。其他规则选项及 SPreset 绑定可在完整 JSON 中编辑。'),
+                  h('p', { className: 'stc-muted' }, '编辑原生 extensions.regex_scripts。规则按列表顺序执行，历史发送规则按当前楼层深度应用。范围、深度和 SPreset 绑定可在完整 JSON 中编辑。'),
                   h('div', { className: 'stc-row' }, button('新增正则', () => {
                     changeDocument(next => { next.extensions ||= {}; next.extensions.regex_scripts ||= []; next.extensions.regex_scripts.push({ id: 'stcontext-' + Math.random().toString(36).slice(2), scriptName: '新正则', findRegex: '/(?:)/g', replaceString: '', disabled: true, placement: [2], trimStrings: [] }); });
                     setEditor(current => ({ ...current, regexIndex: regexes.length }));
@@ -366,8 +368,8 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
                     check('启用此正则', rule.disabled !== true && rule.enabled !== false, value => changeDocument(next => { const item = next.extensions.regex_scripts[editor.regexIndex]; item.disabled = !value; if (Object.hasOwn(item, 'enabled')) item.enabled = value; })),
                     field('查找正则', rule.findRegex, value => patchRule('findRegex', value), { multiline: true, rows: 3, spellCheck: false }),
                     field('替换文本', rule.replaceString, value => patchRule('replaceString', value), { multiline: true, rows: 4 }),
-                    h('div', { className: 'stc-row' }, ...[[1, '用户输入'], [2, '模型输出']].map(([value, label]) => h('span', { key: value }, check(label, rule.placement?.map(Number).includes(value) || false,
-                      enabled => patchRule('placement', enabled ? [...(rule.placement || []), value] : (rule.placement || []).filter(item => Number(item) !== value)))))),
+                    h('div', { className: 'stc-row' }, ...[[1, '用户输入'], [2, '模型输出']].map(([value, label]) => h('span', { key: value }, check(label, placements.map(Number).includes(value),
+                      enabled => patchRule('placement', enabled ? [...placements, value] : placements.filter(item => Number(item) !== value)))))),
                     h('div', { className: 'stc-row' }, ...[[-1, '上移正则'], [1, '下移正则']].map(([delta, label]) => button(label, () => {
                       changeDocument(next => { const items = next.extensions.regex_scripts; items.splice(editor.regexIndex + delta, 0, items.splice(editor.regexIndex, 1)[0]); });
                       setEditor(current => ({ ...current, regexIndex: current.regexIndex + delta }));
@@ -553,15 +555,15 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
                 activeReport.hooks?.length > 0 && h('p', { className: 'stc-meta' }, '处理阶段：' + activeReport.hooks.join(' → ')),
                 ...(activeReport.blockers || []).map((text, index) => h('p', { key: 'b' + index, className: 'stc-message stc-error', role: 'alert' }, text)),
                 h('ul', null, ...(activeReport.warnings || []).map((text, index) => h('li', { key: index }, text))),
-                activeReport.historyRules?.length > 0 && h('details', null, h('summary', null, '不对历史正文重复执行的规则'), h('ul', null, ...activeReport.historyRules.map(rule => h('li', { key: rule.index }, rule.name)))),
+                activeReport.historyRules?.length > 0 && h('details', null, h('summary', null, '按本轮深度应用的历史发送规则'), h('ul', null, ...activeReport.historyRules.map(rule => h('li', { key: rule.index }, rule.name)))),
                 selected && h('p', { className: 'stc-meta' }, 'SHA-256：' + selected.digest))),
             requestShown && h('section', { className: 'stc-card stc-request', 'aria-label': '请求预览' },
               h('div', { className: 'stc-card-title' }, h('div', null, h('h3', null, '请求预览'), h('p', { className: 'stc-request-name' }, 'stcontext-request.json')),
                 h('div', { className: 'stc-row' }, h('button', { className: 'stc-button', onClick: () => download('stcontext-request.json', request) }, '下载完整请求'), h('button', { className: 'stc-button stc-quiet', onClick: () => setRequestShown(false) }, '收起'))),
               typeof report?.outputProcessing?.hostRegex === 'boolean' && h('p', { className: 'stc-muted' },
                 report.outputProcessing.hostRegex
-                  ? 'STcontext 先应用预设输出正则，DSH Tavern 保存正文时再应用宿主正则。两边配置的相同规则可能先后执行。'
-                  : '本轮使用 STcontext 预设输出正则，宿主正则已关闭。'),
+                  ? '宿主额外正则已开启，会继续处理模型历史和聊天显示。两边启用相同规则时可能重复替换。'
+                  : '本轮由预设分别处理聊天显示和发送历史。'),
               h('pre', null, request))));
         }
         ctx.effect(() => ctx.slots.inject('settings.section', () => ctx.slots.register({

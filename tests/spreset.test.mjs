@@ -70,12 +70,40 @@ test('SPreset hooks and local helper scripts are detected while uploads remain d
   assert.throws(() => compile(doc), /never evaluate/);
 });
 
-test('final request scripts cannot remove or alter frozen history, inputs, requirements or state', () => {
-  for (const body of ['request.messages=[];', 'request.messages=[{role:"user",content:"replacement"}];',
-    'request.messages=request.messages.map(m=>({...m,content:m.content.replace("完整历史正文", "摘要")}));']) {
-    const doc = preset({ FinalRequestProcessing: { enabled: true, script: '({request})=>{' + body + 'return request;}' } });
-    assert.throws(() => compile(doc), /完整历史保护|完整 messages/);
-  }
+test('final request hooks may replace the uploaded text while the source chat stays intact', () => {
+  const doc = preset({ FinalRequestProcessing: { enabled: true, script: `({request}) => {
+    request.messages = [{role:'user', content:'经过预设重组的本轮上传文本'}];
+    return request;
+  }` } });
+  assert.deepEqual(compile(doc).request.messages, [{ role: 'user', content: '经过预设重组的本轮上传文本' }]);
+  assert.equal(materials.history[2].text, '完整历史正文 {{不要再次展开}}');
+  doc.extensions.SPreset.FinalRequestProcessing.script = '({request})=>({...request,messages:[]})';
+  assert.throws(() => compile(doc), /完整 messages/);
+});
+
+test('final hooks can use frozen ST chat, active preset and versioned metadata without a browser', () => {
+  const doc = preset({ FinalRequestProcessing: { enabled: true, script: `async ({ request }) => {
+    const ctx = window.top.SillyTavern.getContext();
+    const current = ctx.chat.at(-1);
+    const last = ctx.chat.find(row => row.extra.seen)?.extra.seen || '';
+    ctx.chatMetadata.round = (ctx.chatMetadata.round || 0) + 1;
+    current.extra.seen = current.mes;
+    request.messages = [{ role: 'user', content: JSON.stringify([last, current.mes, ctx.chatMetadata.round,
+      ctx.chatCompletionSettings.prompt_order[0].character_id, ctx.getCurrentChatId(),
+      TavernHelper.getVariables({type:'message'}).inputCount, typeof fetch, typeof window.document]) }];
+    return request;
+  }` } });
+  const first = compile(doc), original = compilerMaterials(materials);
+  assert.deepEqual(JSON.parse(first.request.messages[0].content),
+    ['', materials.input.text, 1, 100001, materials.gameId, 2, 'undefined', 'undefined']);
+  assert.deepEqual(first.scriptState, { chatMetadata: { round: 1 }, currentInputExtra: { seen: materials.input.text } });
+  original.history = [...original.history, { role: 'user', text: materials.input.text, extra: first.scriptState.currentInputExtra }, { role: 'assistant', text: '旧正文' }];
+  original.input = { raw: '下一轮', projected: '下一轮' };
+  original.scriptState = { chatMetadata: first.scriptState.chatMetadata };
+  const second = compilePreset(doc, original, settings);
+  assert.deepEqual(JSON.parse(second.request.messages[0].content).slice(0, 3), [materials.input.text, '下一轮', 2]);
+  assert.equal(first.scriptState.chatMetadata.round, 1);
+  assert.deepEqual(compilePreset(doc, original, settings).scriptState, second.scriptState);
 });
 
 test('conditional merging, separators and history groups preserve complete source text', () => {
@@ -90,12 +118,21 @@ test('conditional merging, separators and history groups preserve complete sourc
   for (const row of materials.history) assert.ok(merged.request.messages.some(m => m.content.includes(row.text)));
 });
 
-test('model route, frozen controls and unexpected wire fields cannot be replaced by scripts', () => {
-  for (const body of ['request.model="other";', 'request.max_tokens=1;', 'request.temperature=0;', 'request.url="https://example.invalid";',
+test('model route, output budget and unexpected wire fields cannot be replaced by scripts', () => {
+  for (const body of ['request.model="other";', 'request.max_tokens=1;', 'request.url="https://example.invalid";',
     'request.messages[0].name="extra-field";', 'request.custom_include_body="{\\"extra\\":true}";', 'request["tool_"+"choice"]="required";']) {
     const doc = preset({ FinalRequestProcessing: { enabled: true, script: '({request})=>{' + body + 'return request;}' } });
     assert.throws(() => compile(doc), /冻结|协议|字段|强制工具/);
   }
+});
+
+test('final temperature follows the preset hook unless the plugin has an explicit override', () => {
+  const doc = preset({ FinalRequestProcessing: { enabled: true, script: '({request})=>({...request,temperature:0.61})' } });
+  doc.temperature = 0.6;
+  assert.equal(compile(doc).request.temperature, 0.61);
+  assert.equal(compilePreset(doc, compilerMaterials(materials), { ...settings, temperature: 0 }).request.temperature, 0);
+  doc.extensions.SPreset.FinalRequestProcessing.script = '({request})=>({...request,temperature:3})';
+  assert.throws(() => compile(doc), /温度/);
 });
 
 test('dynamically declared output tools require a decoder before any model request', () => {
@@ -158,6 +195,36 @@ test('optional local preset is diagnosed without executing unsupported protocols
   else {
     const result = await runCompiler('compile', { document: doc, materials: compilerMaterials(materials), settings });
     assert.ok(result.request.messages.length);
-    for (const row of materials.history) assert.ok(JSON.stringify(result.request).includes(row.text));
+    assert.ok(result.logicalMessages.some(m => m.content.includes(materials.input.text)));
   }
+});
+
+test('Meowssiah 2.1 consumes a tool-only response and reuses its ledger for the next turn', {
+  skip: !process.env.STCONTEXT_MEOWSSIAH_FIXTURE,
+}, async () => {
+  const document = parsePreset(await readFile(process.env.STCONTEXT_MEOWSSIAH_FIXTURE, 'utf8'));
+  const frame = compilerMaterials(materials);
+  frame.history = frame.history.slice(0, 1);
+  const first = compilePreset(document, frame, settings);
+  assert.deepEqual(first.request.tools.map(x => x.name), ['soliumbra_reply', 'context']);
+  const ledger = first.scriptState.chatMetadata.catgod_oracle.ledger;
+  assert.ok(ledger.baseRuleIds.length);
+  assert.equal(first.scriptState.currentInputExtra.catgod_oracle.mode, 'theater');
+  assert.equal(JSON.parse(first.request.messages.at(-1).content).user_input, frame.input.projected);
+  const response = { text: '', toolCalls: [{ name: 'soliumbra_reply',
+    arguments: JSON.stringify({ game_content: 'Story one.', options: 'Option one.', summary: 'Summary one.' }) }] };
+  const decoded = processOutput({ document, response, toolNames: first.request.tools.map(tool => tool.name), helperState: first.helperState });
+  assert.match(decoded.sourceText, /<game>\s*Story one\.\s*<\/game>/);
+  assert.match(decoded.sourceText, /<summary>\s*Summary one\.\s*<\/summary>/);
+  const next = {
+    ...frame, input: { raw: 'Turn two.', projected: 'Turn two.' },
+    history: [...frame.history, { role: 'user', text: frame.input.projected, extra: first.scriptState.currentInputExtra },
+      { role: 'assistant', text: decoded.text, sourceText: decoded.sourceText }],
+    scriptState: { chatMetadata: first.scriptState.chatMetadata },
+  };
+  const second = compilePreset(document, next, settings);
+  assert.equal(second.scriptState.chatMetadata.catgod_oracle.ledger.createdAt, ledger.createdAt);
+  assert.match(second.request.messages.find(m => m.tool_calls?.[0]?.id === 'call_hist_01').tool_calls[0].function.arguments, /Story one/);
+  assert.ok(second.request.messages.some(m => m.role === 'tool' && m.content.includes('Turn two.')));
+  assert.doesNotMatch(JSON.stringify(second.request), /<template id=.raw-data|<!DOCTYPE html>/i);
 });

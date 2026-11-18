@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { parsePreset, compilePreset, processOutput, inspectPreset } from '../lib/preset.mjs';
 import { createMacroEnvironment, renderMacros } from '../lib/macros.mjs';
 import { runCompiler } from '../lib/worker-client.mjs';
+import { displayRegexes } from '../lib/regex.mjs';
 
 function preset(extra = {}) {
   return {
@@ -32,6 +33,27 @@ test('import selects only the chat-completion order and rejects malformed refere
   assert.equal(inspectPreset(parsed).order, 100001);
   doc.prompt_order[1].order.push({ identifier: 'missing', enabled: true });
   assert.throws(() => parsePreset(JSON.stringify(doc)), /不存在/);
+});
+test('disabled and unsupported display rules are preserved in the preset without blocking valid generation effects', () => {
+  const doc = preset();
+  const broken = rule('/[a-/', 'wrong', { promptOnly: false });
+  const unsupported = rule('/{{char}}/', 'wrong', { promptOnly: false, substituteRegex: 2 });
+  doc.extensions.regex_scripts = [
+    { id: 'unfinished', disabled: true, placement: 'future-format' }, broken, unsupported,
+    rule('/X/g', '_'),
+  ];
+  const loaded = parsePreset(JSON.stringify(doc));
+  assert.deepEqual(loaded, doc);
+  const report = compilePreset(loaded, materials()).report;
+  assert.equal(report.blockers.length, 0);
+  assert.equal(report.diagnostics.filter(x => x.message.includes('已跳过该规则')).length, 2);
+  assert.equal(processOutput({ document: doc, response: { text: 'X' } }).text, '_');
+  assert.deepEqual(displayRegexes(doc).map(x => [x.findRegex, x.markdownOnly, x.promptOnly]), [['/X/g', true, false]]);
+  for (const required of [{ ...broken, markdownOnly: false }, { ...unsupported, promptOnly: true }]) {
+    doc.extensions.regex_scripts = [required];
+    assert.deepEqual(parsePreset(JSON.stringify(doc)), doc);
+    assert.throws(() => compilePreset(doc, materials()), /findRegex|substituteRegex/);
+  }
 });
 test('model role entries outside the selected order import without changing the source', () => {
   const doc = preset();
@@ -67,13 +89,18 @@ test('supporting model aliases does not accept unknown or non-string prompt role
   }
 });
 
-test('all visible prose survives 40/80 boundaries; source macro text is never run', () => {
+test('per-turn prompt depth trims only the selected old assistant rows and leaves the source intact', () => {
   const doc = preset();
   doc.extensions.regex_scripts = [rule('/^[\\s\\S]*$/g', '', { minDepth: 40, promptOnly: true })];
   const history = Array.from({ length: 100 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: '第' + i + '条 {{setvar::old::1}} 完整正文' }));
+  const before = structuredClone(history);
   const result = compilePreset(doc, materials(history));
   assert.equal(result.historyMessages, 100);
-  for (const row of history) assert.ok(result.request.messages.some(message => message.content === row.text), row.text);
+  for (const [index, row] of history.entries()) {
+    const shouldSend = row.role === 'user' || history.length - index < 40;
+    assert.equal(result.request.messages.some(message => message.content === row.text), shouldSend, row.text);
+  }
+  assert.deepEqual(history, before);
   assert.equal(result.request.messages.filter(message => message.content === '本轮输入').length, 1);
   assert.ok(result.request.messages.some(message => message.content.includes('起点状态')));
   assert.throws(() => compilePreset(doc, materials([{ role: 'assistant', text: '隐藏', hidden: true }])), /隐藏/);
@@ -126,39 +153,70 @@ test('empty custom player persona keeps existing captured and legacy material be
     }
   }
 });
-test('input regex wrappers retain full inputs while destructive rules are skipped', () => {
+test('prompt-only input rules run in order against each turn depth', () => {
   const doc = preset();
   doc.extensions.regex_scripts = [
     rule('/^([\\s\\S]*)$/', 'INPUT:$1', { placement: [1], markdownOnly: false, promptOnly: true }),
     rule('/^([\\s\\S]*)$/', '', { placement: [1], markdownOnly: false, promptOnly: true, minDepth: 1 }),
   ];
   const result = compilePreset(doc, materials([{ role: 'user', text: '前轮输入' }, { role: 'assistant', text: '正文' }]));
-  assert.ok(result.request.messages.some(x => x.content === 'INPUT:前轮输入'));
+  assert.ok(!result.request.messages.some(x => x.content.includes('前轮输入')));
   assert.ok(result.request.messages.some(x => x.content === 'INPUT:本轮输入'));
-  assert.ok(result.report.warnings.some(text => text.includes('跳过会删改')));
+  assert.deepEqual(result.report.historyProjections.map(item => [item.role, item.depth, item.beforeLength, item.afterLength, item.rules.length]),
+    [['user', 2, 4, 0, 2], ['user', 0, 4, 10, 1]]);
+  assert.ok(!JSON.stringify(result.report.historyProjections).includes('本轮输入'));
 });
-test('output regex uses one ordered union pass, preserves display HTML and never reprocesses', () => {
+test('write, display and next-turn prompt regexes start from the ST source for each branch', () => {
   const doc = preset();
   doc.extensions.regex_scripts = [
     rule('/X/g', 'XX'),
     rule('/Y/g', '<b>Y</b>', { markdownOnly: true, promptOnly: false }),
     rule('/X/g', 'Z', { disabled: true }),
     rule('/X/g', '', { minDepth: 1 }),
+    rule('/Y/g', 'ZY', { markdownOnly: false, promptOnly: false, minDepth: 99 }),
+    rule('/Z/g', 'P', { markdownOnly: false, promptOnly: true }),
   ];
   const result = processOutput({ document: doc, response: { text: 'XY' } });
-  assert.equal(result.text, 'XX<b>Y</b>');
-  assert.equal(result.metadata.outputRegexPasses, 1);
-  assert.equal(result.metadata.appliedRegex.length, 2);
+  assert.equal(result.sourceText, 'XZY');
+  assert.equal(result.displayText, 'XXZ<b>Y</b>');
+  assert.equal(result.text, result.displayText);
+  assert.equal(result.metadata.appliedRegex.write.length, 1);
+  assert.equal(result.metadata.appliedRegex.display.length, 2);
+  const next = compilePreset(doc, materials([{ role: 'assistant', text: result.displayText, sourceText: result.sourceText }]));
+  assert.ok(next.request.messages.some(message => message.content === 'PY'));
+  assert.doesNotMatch(JSON.stringify(next.request.messages), /<b>/);
+});
+test('user source survives non-idempotent write rules, preset changes and prompt projection', () => {
+  const doc = preset();
+  doc.extensions.regex_scripts = [
+    rule('/输入/g', '输入!', { placement: [1], markdownOnly: false, promptOnly: false }),
+    rule('/!/', '?', { placement: [1], markdownOnly: false, promptOnly: true, maxDepth: 0 }),
+  ];
+  const first = compilePreset(doc, materials([]));
+  assert.equal(first.inputSourceText, '本轮输入!');
+  assert.equal(first.request.messages.at(-1).content, '本轮输入?');
+  const next = compilePreset(doc, materials([{ role: 'user', text: '本轮输入', sourceText: first.inputSourceText }]));
+  assert.ok(next.request.messages.some(message => message.content === '本轮输入!'));
+  assert.doesNotMatch(JSON.stringify(next.request.messages), /输入!!/);
 });
 test('output replacement supports whole/numeric/named captures and trimStrings', () => {
   const doc = preset(); doc.extensions.regex_scripts = [rule('/(?<word>A)(B)/g', '$0|$1|$<word>|$$', { trimStrings: ['B'] })];
-  assert.equal(processOutput({ document: doc, response: { text: 'AB' } }).text, 'A|A|A|$');
+  assert.equal(processOutput({ document: doc, response: { text: 'AB' } }).text, 'A|A|A|$$');
 });
 test('empty processed result and malformed tool arguments cannot replace a body', () => {
-  const doc = preset(); doc.extensions.regex_scripts = [rule('/.*/g', '')];
+  const doc = preset(); doc.extensions.regex_scripts = [rule('/.*/g', '', { markdownOnly: false, promptOnly: false })];
   assert.throws(() => processOutput({ document: doc, response: { text: '原文' } }), /正文为空/);
   assert.throws(() => processOutput({ document: doc, toolNames: ['tool'], response: { toolCalls: [{ name: 'tool', arguments: '{"body":"unfinished' }] } }), /JSON/);
   assert.throws(() => processOutput({ document: doc, toolNames: ['tool'], response: { toolCalls: [{ name: 'other', arguments: {} }] } }), /未声明/);
+});
+test('a fully hidden display does not discard the canonical reply', () => {
+  const doc = preset(); doc.extensions.regex_scripts = [rule('/.*/g', '', { promptOnly: false })];
+  const payload = { document: doc, response: { text: '存档正文' } };
+  assert.equal(processOutput(payload).text, '');
+  assert.equal(processOutput(payload).sourceText, '存档正文');
+  const delegated = processOutput({ ...payload, projectDisplay: false });
+  assert.equal(delegated.text, '存档正文');
+  assert.deepEqual(delegated.metadata.appliedRegex.display, []);
 });
 test('macro environment is local and unsupported expressions are not executed', () => {
   const env = createMacroEnvironment({ userName: '甲', random: () => 0 });
@@ -182,18 +240,30 @@ test('bounded worker cancels pathological output regex without blocking the host
 test('imported user fixture compiles without embedding its JSON in the plugin', { skip: !process.env.STCONTEXT_PRESET_FIXTURE }, async () => {
   const doc = parsePreset(await readFile(process.env.STCONTEXT_PRESET_FIXTURE, 'utf8'));
   const history = Array.from({ length: 90 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: '  fixture-row-' + i + ' 完整历史 {{target_length}} 【HISTORICAL_USER_INPUT】  ' }));
+  for (const i of [49, 50, 51]) history[i] = { role: 'assistant',
+    text: 'fixture-row-' + i + ' "引号" \\路径 {{target_length}} <sumUp>摘要-' + i + '</sumUp><choices>选项-' + i + '</choices>' };
   const result = await runCompiler('compile', { document: doc, materials: materials(history) });
   assert.equal(result.report.order, 100001); assert.equal(result.report.protocol, 'spreset');
   assert.deepEqual(result.request.messages.map(message => message.role), ['system', 'user', 'assistant', 'user']);
   assert.equal(result.request.tools.length, 1);
-  for (const row of history) assert.ok(result.request.tools[0].description.includes(row.text), row.text);
+  const context = result.request.tools[0].description;
+  const rowsSent = [...context.matchAll(/fixture-row-(\d+) /g)].map(match => Number(match[1]));
+  // Depth 80 and older disappear. The AI summary at depth 40/41 replaces
+  // its original floor, whereas depth 39 keeps prose and drops the summary.
+  assert.deepEqual(rowsSent, Array.from({ length: 79 }, (_, i) => i + 11).filter(i => i !== 49 && i !== 50));
+  for (const i of [49, 50]) assert.ok(context.includes('摘要-' + i));
+  assert.ok(!context.includes('摘要-51'));
+  assert.ok(context.includes('fixture-row-51 "引号" \\路径 {{target_length}}'));
+  assert.doesNotMatch(context, /选项-(49|50|51)/);
+  assert.ok(context.includes('fixture-row-89 完整历史 {{target_length}}'));
   assert.ok(result.request.tools[0].description.includes('本轮输入'));
   assert.ok(result.request.tools[0].description.includes('起点状态'));
   assert.doesNotMatch(JSON.stringify(result.request), /"content":"[^"]*\{\{(?:target_length|perspective_rules|current_chapter_file)\}\}/);
   const toolNames = result.request.tools.map(t => t.name);
   const processed = await runCompiler('output', { document: doc, response: { toolCalls: [{ name: toolNames[0], arguments: JSON.stringify({ buffer_content: '<talk>过程</talk><content><hidden>极其平静的正文</hidden></content>' }) }] }, helperState: result.helperState, toolNames });
   assert.equal(processed.text, '平静的正文</content>');
-  assert.equal(processed.metadata.outputRegexPasses, 1);
+  assert.equal(processed.sourceText, '<talk>过程</talk><content><hidden>极其平静的正文</hidden></content>');
+  assert.ok(Array.isArray(processed.metadata.appliedRegex.display));
 });
 
 test('resolved card context contains examples once and never reintroduces raw template sources', () => {

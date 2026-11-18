@@ -130,7 +130,7 @@ for (const failed of [false, true]) test(`upstream ${failed ? 'failed-input retr
   const result = await generation.regenerate('session');
   assert.equal(result.settlement, 'done');
   assert.equal(modelCalls, 1);
-  assert.equal(candidate.text, kunlun ? '平静的正文</content>' : '<div>XX</div>');
+  assert.equal(candidate.text, kunlun ? rawOutput : '<div>X</div>');
   assert.deepEqual(projections, [candidate.text]); assert.deepEqual(notifications, [failed ? 4 : 3]);
   assert.deepEqual(phases, ['generating', 'validating', 'committed', 'settling']);
   assert.equal(capturedMaterials.completeness.history, 'all-visible');

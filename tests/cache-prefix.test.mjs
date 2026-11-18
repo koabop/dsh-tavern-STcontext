@@ -213,7 +213,7 @@ test('ChatSquash distinguishes automatic turn context from user-authored prompts
   }
 });
 
-test('ChatSquash and helper rewrites retain raw duplicated material while destructive final hooks fail', () => {
+test('ChatSquash preserves repeated literal macros while hooks can rewrite surrounding prose', () => {
   const host = snapshot(), repeated = '[REPEATED_RAW]{{user}}';
   host.context.find(item => item.id === 'tavern:constant-worldbook').text = repeated;
   host.context.find(item => item.id === 'tavern:worldbook').text = repeated;
@@ -225,8 +225,9 @@ test('ChatSquash and helper rewrites retain raw duplicated material while destru
       tavern_helper: { scripts: [{ id: 'rewrite', name: 'synthetic rewrite', enabled: true,
         content: 'eventOn(tavern_events.CHAT_COMPLETION_SETTINGS_READY, request => { for (const message of request.messages) message.content = message.content.replaceAll("[REPEATED_RAW]", "CORRUPTED"); });' }] } };
     const result = compile(host, document);
-    assertAllMaterials(result.request, host);
-    assert.doesNotMatch(modelText(result.request), /CORRUPTED|STCONTEXT_MATERIAL_/);
+    assert.equal(modelText(result.request).split('CORRUPTED{{user}}').length - 1, 4);
+    assert.doesNotMatch(modelText(result.request), /REPEATED_RAW|STCONTEXT_MATERIAL_/);
+    assert.equal(host.history[0].text, repeated);
     // Test final-hook counting separately, with three identical standalone
     // materials and no nested macros or overlapping larger material strings.
     const duplicateHost = snapshot(), duplicateText = '[DUPLICATE]';
@@ -238,25 +239,34 @@ test('ChatSquash and helper rewrites retain raw duplicated material while destru
     assertAllMaterials(compile(duplicateHost, document).request, duplicateHost);
     document.extensions.SPreset.FinalRequestProcessing = { enabled: true,
       script: '({request}) => { const message = request.messages.find(item => item.content.includes("[DUPLICATE]")); message.content = message.content.replace("[DUPLICATE]", ""); return request; }' };
-    assert.throws(() => compile(duplicateHost, document), /完整历史保护/);
+    assert.equal(modelText(compile(duplicateHost, document).request).split(duplicateText).length - 1, 2);
+    assert.equal(duplicateHost.history[0].text, duplicateText);
   }
 });
 
-test('optional Meowssiah tool context preserves the old history prefix across changing turn material', { skip: !process.env.STCONTEXT_COMPAT_FIXTURE }, async () => {
+test('optional Meowssiah fixture carries ordered historical prose and current material in its tool protocol', { skip: !process.env.STCONTEXT_COMPAT_FIXTURE }, async () => {
   const document = parsePreset(await readFile(process.env.STCONTEXT_COMPAT_FIXTURE, 'utf8'));
   const host = snapshot(), next = nextTurn(host);
   const before = compile(host, document).request, after = compile(next, document).request;
-  const left = before.tools?.find(tool => tool.name === 'context')?.description;
-  const right = after.tools?.find(tool => tool.name === 'context')?.description;
-  assert.equal(typeof left, 'string'); assert.equal(typeof right, 'string');
-  const lastHistory = host.history.at(-1).text, historyEnd = left.indexOf(lastHistory) + lastHistory.length;
-  assert.ok(historyEnd >= lastHistory.length, 'context tool must contain the last historical message');
-  assert.equal(left.slice(0, historyEnd), right.slice(0, historyEnd));
-  for (const [text, content] of [['[STATE_A]', left], ['[LORE_A]', left], ['[GUIDE_A]', left], ['[STATE_B]', right], ['[LORE_B]', right], ['[GUIDE_B]', right]]) {
-    assert.ok(content.indexOf(text) >= historyEnd, text + ' must not invalidate the historical prefix');
+  const contextFields = request => [
+    ...request.messages.filter(message => message.role === 'tool' && message.name === 'context').map(message => message.content),
+    request.tools?.find(tool => tool.name === 'context')?.description,
+  ].filter(Boolean);
+  for (const [request, material] of [[before, host], [after, next]]) {
+    // Some releases put context in a tool description. 2.1 places the
+    // assembled registry in the result of its synthetic context tool call.
+    const fields = contextFields(request);
+    const registry = fields.find(text => text.includes(host.history[0].text));
+    assert.ok(registry, 'missing historical context payload');
+    let end = 0;
+    for (const row of material.history) {
+      const start = registry.indexOf(row.text, end);
+      assert.ok(start >= end, 'missing or reordered floor ' + row.text.slice(0, 20));
+      end = start + row.text.length;
+    }
+    for (const text of [material.state.status, material.guidance, ...material.context.map(item => item.text)]) {
+      assert.ok(fields.some(field => field.includes(text)), 'missing context material ' + text);
+    }
+    assert.ok(fields.some(field => field.includes(material.input.text)));
   }
-  // This preset deliberately repeats the input in its tool synchronization
-  // result; require every captured occurrence without forbidding that protocol.
-  assertAllMaterials(before, host, { allowAdditional: true });
-  assertAllMaterials(after, next, { allowAdditional: true });
 });

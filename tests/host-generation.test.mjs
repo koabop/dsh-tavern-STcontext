@@ -27,12 +27,12 @@ for (const mode of ['plugin-direct', 'plugin-tool-call']) test(`upstream ${mode}
     yield { type: 'finish', reason: { kind: 'stop' } };
   } });
   const { receipt, supportsHostRegex, saved, projected } = result;
-  assert.equal(JSON.parse(receipt).text, '<div>XX</div>');
+  assert.equal(JSON.parse(receipt).text, '<div>X</div>');
   assert.equal(requests, 1); assert.equal(result.concludes, 1); assert.equal(result.settlements, 1);
   const state = result.state();
   assert.equal(state.messages.length, 3);
-  assert.equal(saved.sourceText, '<div>XX</div>');
-  assert.equal(saved.text, supportsHostRegex ? '<div>CONTEXT</div>' : '<div>XX</div>');
+  assert.equal(saved.sourceText, '<div>X</div>');
+  assert.equal(saved.text, '<div>X</div>');
   assert.equal(saved.displayText, supportsHostRegex ? '<div>DISPLAY</div>' : '<div>XX</div>');
   assert.equal(saved.bodyRegenerationProcessed, true);
   assert.equal(projected, saved.text);
@@ -61,9 +61,9 @@ for (const mode of ['plugin-direct', 'plugin-tool-call']) test(`upstream ${mode}
     yield { type: 'finish', reason: { kind: 'tool-calls' } };
   } });
   assert.equal(requests, 1);
-  assert.equal(JSON.parse(result.receipt).text, '测试正文XX');
+  assert.equal(JSON.parse(result.receipt).text, '测试正文X');
   assert.equal(result.concludes, 1); assert.equal(result.settlements, 1);
   assert.equal(result.state().messages.length, 3);
-  assert.equal(result.saved.sourceText, '测试正文XX');
+  assert.equal(result.saved.sourceText, '测试正文X');
   assert.equal(result.projected, result.saved.text);
 });

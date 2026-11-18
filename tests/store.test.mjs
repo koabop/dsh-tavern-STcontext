@@ -190,6 +190,7 @@ test('stale edits, invalid JSON, quota errors and deleted targets leave saved da
   const before = await tavern.readPluginData();
   const invalids = ['{broken', JSON.stringify({ ...document, temperature: -1 }),
     JSON.stringify({ ...document, prompt_order: [...document.prompt_order, { character_id: 100000, order: [{ identifier: 'missing' }] }] }),
+    JSON.stringify({ ...document, extensions: { regex_scripts: [{ findRegex: '/[/', promptOnly: true, placement: [2] }] } }),
     JSON.stringify({ ...document, extensions: { regex_scripts: [{ findRegex: '/[/' }] } })];
   for (const source of invalids) {
     await assert.rejects(upload(store, source, 'edited.json', options));
@@ -205,6 +206,19 @@ test('stale edits, invalid JSON, quota errors and deleted targets leave saved da
   await store.remove({ id });
   await assert.rejects(upload(store, JSON.stringify(document), 'deleted.json', options), /已被移除/);
   assert.equal((await store.list()).presets.length, 0);
+});
+
+test('editing preserves unusable display-only and disabled regex rules', async () => {
+  const store = createPresetStore(fakeTavern());
+  const imported = await upload(store, JSON.stringify(document));
+  const source = JSON.stringify({ ...document, extensions: { regex_scripts: [
+    { findRegex: '/[/', placement: [2], markdownOnly: true },
+    { findRegex: '/[/', placement: [2], promptOnly: true, disabled: true },
+  ] } });
+  const id = imported.activeId;
+  const saved = await upload(store, source, 'edited.json', { operation: 'replace', presetId: id, revision: imported.presets[0].revision });
+  assert.equal(saved.presets[0].summary.blockers, 0);
+  assert.equal((await store.export({ id })).text, source);
 });
 
 test('draft validation is read-only; cancellation and expiration release upload slots', async () => {
