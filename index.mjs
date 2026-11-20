@@ -22,6 +22,13 @@ export function apply(ctx) {
   const capable = () => ctx.tavern.capabilities?.bodyGeneration === 1 && typeof ctx.tavern.bodyGenerator === 'function';
   const handle = (key, callback) => ctx.tavern.handle(PREFIX + '/' + key, callback);
   handle('config', async () => ({ ...(await store.list()), ...(await store.listHostPresets()), hostReady: capable(), generationReady: capable() }));
+  handle('body-generation-defaults', ({ mode, hostRegex } = {}) => {
+    if (capable() && ctx.tavern.capabilities?.bodyGenerationDefaults === 1 && typeof ctx.tavern.bodyGenerationDefaults === 'function') {
+      return ctx.tavern.bodyGenerationDefaults({ name: PROVIDER, mode, hostRegex });
+    }
+    if (mode !== undefined || hostRegex !== undefined) throw new Error('请在「设置 → DSH Tavern → 剧情」修改正文生成设置。');
+    return null;
+  });
   handle('models', () => listGenerationModels(ctx.llm));
   handle('model-reasoning', input => readGenerationModelReasoning(ctx.llm, input));
   handle('upload/begin', input => store.begin(input));

@@ -28,7 +28,7 @@ test('sidebar, overlay and native settings reach all content in short and narrow
         const errors = [];
         page.on('pageerror', error => errors.push(error.message));
         try {
-          let data;
+          let data, bodyDefaults = { mode: 'plugin-direct', hostRegex: false };
           const sharedId = 'presets/shared.json';
           const store = createPresetStore({ readPluginData: async () => structuredClone(data), savePluginData: async input => { data = structuredClone(input.data); },
             capabilities: { generationPresets: 1 },
@@ -53,6 +53,7 @@ test('sidebar, overlay and native settings reach all content in short and narrow
               const config = await store.list();
               return { ...config, ...await store.listHostPresets(), hostReady: true };
             }
+            if (method === 'body-generation-defaults') return bodyDefaults = { ...bodyDefaults, ...input };
             if (method === 'preset/report') {
               const part = await store.report(input), report = JSON.parse(part.text);
               report.warnings.push(...Array.from({ length: 25 }, (_, i) => `兼容提示 ${i + 1}：这是一条用于检查完整内容可达性的说明。`));
@@ -100,6 +101,13 @@ test('sidebar, overlay and native settings reach all content in short and narrow
             window.remount = () => { root.unmount(); root = modules['react-dom/client'].createRoot(document.querySelector('main')); root.render(element); };
           }, surface);
           await page.waitForFunction(() => document.querySelector('.stc-header-status')?.textContent === '配置就绪');
+          if (surface === 'sidebar') {
+            await page.getByRole('combobox', { name: '默认正文生成方式' }).selectOption('plugin-tool-call');
+            await page.getByRole('checkbox', { name: '追加宿主正则' }).click();
+            await page.locator('input[aria-label="追加宿主正则"]:checked').waitFor();
+            await page.getByText('正文生成默认设置已保存', { exact: true }).waitFor();
+            assert.deepEqual(bodyDefaults, { mode: 'plugin-tool-call', hostRegex: true });
+          }
           await page.getByText('兼容报告', { exact: false }).click();
           if (surface !== 'settings') await page.getByRole('button', { name: '查看本次请求' }).click();
           const selector = surface === 'settings' ? 'main' : '.stc-scroll';

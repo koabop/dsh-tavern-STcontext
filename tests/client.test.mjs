@@ -10,7 +10,7 @@ const simplePreset = { prompts: [{ identifier: 'chatHistory', marker: true }],
   prompt_order: [{ character_id: 100001, order: [{ identifier: 'chatHistory', enabled: true }] }] };
 
 // Drive the real client and host entry with a tiny hook scheduler; no DOM or framework dependency.
-function harness({ hostReady = true, initialModel, initialSettings = {}, catalogFailure = false, resolveModelInfo, getStorageLimits } = {}) {
+function harness({ hostReady = true, initialModel, initialSettings = {}, catalogFailure = false, resolveModelInfo, getStorageLimits, bodyGenerationDefaults } = {}) {
   const hooks = [], effects = [], pending = new Set(), timers = new Map(), calls = [], downloads = [], disposers = [];
   let cursor = 0, dirty = true, tree, component, properties, panel, action, overlay, registered, settingsSection, settingsSpec, saved, serial = 0;
   const handlers = new Map();
@@ -21,6 +21,10 @@ function harness({ hostReady = true, initialModel, initialSettings = {}, catalog
     handle: (key, fn) => handlers.set(key, fn), onGameRemoved() {} };
   if (getStorageLimits) tavern.getPluginDataLimits = getStorageLimits;
   if (hostReady) Object.assign(tavern, { capabilities: { bodyGeneration: 1 }, bodyGenerator() {} });
+  if (bodyGenerationDefaults) {
+    tavern.capabilities.bodyGenerationDefaults = 1;
+    tavern.bodyGenerationDefaults = bodyGenerationDefaults;
+  }
   apply({ tavern, get: () => undefined, llm: {
     listProviders: () => [{ id: 'own', name: 'Own Provider' }],
     listModels: async () => { if (modelFailure) throw new Error('offline'); return models.map(({ reasoning, ...summary }) => summary); },
@@ -125,6 +129,41 @@ function harness({ hostReady = true, initialModel, initialSettings = {}, catalog
   };
 }
 const file = (text, name = 'imported.json') => ({ name, size: Buffer.byteLength(text), text: async () => text });
+
+test('sidebar reads existing host story defaults and saves mode and regex through the registered generator', async () => {
+  let defaults = { mode: 'plugin-tool-call', hostRegex: true };
+  const h = harness({ bodyGenerationDefaults: async ({ name, mode, hostRegex }) => {
+    assert.equal(name, 'st-context');
+    defaults = { mode: mode ?? defaults.mode, hostRegex: hostRegex ?? defaults.hostRegex };
+    return defaults;
+  } });
+  try {
+    await h.mount();
+    assert.equal(h.selectValue('默认正文生成方式'), 'plugin-tool-call');
+    assert.equal(h.checkbox('追加宿主正则').checked, true);
+    await h.choose('默认正文生成方式', 'plugin-direct');
+    await h.field('追加宿主正则', false);
+    assert.deepEqual(defaults, { mode: 'plugin-direct', hostRegex: false });
+    assert.match(h.text(), /正文生成默认设置已保存/);
+    await h.choose('默认正文生成方式', 'host');
+    assert.equal(defaults.mode, 'host');
+    assert.equal(h.checkbox('追加宿主正则').disabled, true);
+    assert.equal(h.saved.settings.storyGenerationMode, undefined);
+  } finally { h.destroy(); }
+});
+
+test('older hosts keep the legacy configuration path and the standalone controls stay in the sidebar', async () => {
+  const sidebar = harness(), overlay = harness(), settings = harness();
+  try {
+    await sidebar.mount();
+    assert.equal(sidebar.selectValue('默认正文生成方式'), undefined);
+    assert.match(sidebar.text(), /设置 → DSH Tavern → 剧情/);
+    await assert.rejects(sidebar.host('body-generation-defaults', { mode: 'plugin-direct' }), /设置 → DSH Tavern → 剧情/);
+    await overlay.mount(true);
+    await settings.mount('settings');
+    for (const view of [overlay, settings]) assert.equal(view.calls.some(({ name }) => name === 'body-generation-defaults'), false);
+  } finally { sidebar.destroy(); overlay.destroy(); settings.destroy(); }
+});
 
 test('model role presets import, export and edit without silently changing the role', async () => {
   const h = harness();
@@ -359,8 +398,7 @@ test('client imports, exports, saves controls and directs generation to upstream
     assert.doesNotMatch(h.text(), /输出\s*token\s*上限|上下文预算|温度/);
     await h.click('保存设置');
     assert.deepEqual(h.saved.settings.model, { provider: 'own', model: 'story', reasoningEffort: 'high' });
-    assert.match(h.text(), /插件直接生成/);
-    assert.match(h.text(), /前台检索后由插件生成/);
+    assert.match(h.text(), /插件 → STcontext」设置默认生成方式/);
     assert.match(h.text(), /使用宿主的发送、重生成、失败重试和停止按钮/);
     assert.equal(h.disabled('取消生成'), undefined);
     assert.equal(h.calls.some(call => ['start', 'status', 'cancel'].includes(call.name)), false);
