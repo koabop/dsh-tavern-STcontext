@@ -136,8 +136,9 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
           const a = document.createElement('a'); a.href = url; a.download = name; a.click();
           setTimeout(() => URL.revokeObjectURL(url), 1000);
         }
-        function Panel({ gameId, close, settingsPage = false }) {
+        function Panel({ gameId, close, settingsPage = false, manageDefaults = false, visible = true }) {
           const [config, setConfig] = React.useState(null);
+          const [bodyDefaults, setBodyDefaults] = React.useState(undefined);
           const [error, setError] = React.useState(''), [notice, setNotice] = React.useState(''), [working, setWorking] = React.useState(false);
           const [settings, setSettings] = React.useState({}), [report, setReport] = React.useState(null);
           const [presetReport, setPresetReport] = React.useState({ key: '', value: null, error: '' });
@@ -194,10 +195,25 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
             refreshModels();
             return () => { alive.current = false; };
           }, []);
+          React.useEffect(() => {
+            if (!manageDefaults || !visible) return;
+            let active = true;
+            setBodyDefaults(undefined);
+            call('body-generation-defaults').then(value => { if (active) setBodyDefaults(value); }, err => {
+              if (active) setError(err.message || String(err));
+            });
+            return () => { active = false; };
+          }, [manageDefaults, visible]);
           async function act(work) {
             setWorking(true); setError(''); setNotice('');
             try { await work(); } catch (err) { if (alive.current) setError(err.message || String(err)); }
             finally { if (alive.current) setWorking(false); }
+          }
+          function saveBodyDefaults(patch) {
+            return act(async () => {
+              const value = await call('body-generation-defaults', patch);
+              if (alive.current) { setBodyDefaults(value); setNotice('正文生成默认设置已保存'); }
+            });
           }
           async function importFile(selected) {
             if (!selected) return;
@@ -538,10 +554,24 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
               h('p', { className: 'stc-muted' }, '保存后按原文填入 Persona Description；留空不额外添加。预设未启用该占位项时会自动补入，宿主原有玩家材料仍保留。'),
               h('div', { className: 'stc-card-footer stc-row stc-between' }, h('span', { className: 'stc-muted', role: 'status' }, settingsDirty ? '有未保存的更改' : '设置对所有会话生效'),
                 h('button', { className: 'stc-button', disabled: busy || !config || reasoningLoading, onClick: () => act(async () => { await saveSettings(); setNotice('设置已保存'); }) }, '保存设置')))),
+            manageDefaults && h('section', { className: 'stc-card stc-config-card stc-generation', 'aria-label': '正文生成默认设置' },
+              h('h3', null, '正文生成默认设置'),
+              bodyDefaults === null ? h('p', { className: 'stc-muted' }, '当前宿主请在「设置 → DSH Tavern → 剧情」选择 STcontext、生成方式和宿主正则。')
+                : bodyDefaults === undefined ? null : h(React.Fragment, null,
+                  h('label', { className: 'stc-field' }, '默认正文生成方式',
+                    h('select', { 'aria-label': '默认正文生成方式', className: 'stc-select', value: bodyDefaults.mode, disabled: busy,
+                      onChange: event => saveBodyDefaults({ mode: event.target.value }) },
+                      h('option', { value: 'host' }, '默认不使用 STcontext'),
+                      h('option', { value: 'plugin-direct' }, '由 STcontext 直接生成'),
+                      h('option', { value: 'plugin-tool-call' }, '前台检索后由 STcontext 生成'))),
+                  h('label', { className: 'stc-row' },
+                    h('input', { type: 'checkbox', 'aria-label': '追加宿主正则', checked: bodyDefaults.hostRegex, disabled: busy || bodyDefaults.mode === 'host',
+                      onChange: event => saveBodyDefaults({ hostRegex: event.target.checked }) }), '追加宿主正则'),
+                  h('p', { className: 'stc-muted' }, '选择由 STcontext 生成会将它设为默认生成器。更改立即保存，并在跟随全局的会话中从下一次生成开始生效。'))),
             renderEditor(),
             h('section', { className: 'stc-card stc-generation', 'aria-label': '使用说明' },
               h('h3', null, '正文生成'),
-              h('p', { className: 'stc-muted' }, '先保存预设与模型设置，再在「设置 → DSH Tavern → 剧情」选择 STcontext 和「插件直接生成」。如需前台模型先查世界书，选择「前台检索后由插件生成」。本局设置可覆盖全局选择。'),
+              h('p', { className: 'stc-muted' }, '先保存预设与模型设置，再从侧栏「＋ → 插件 → STcontext」设置默认生成方式。本局设置可以覆盖默认值。'),
               h('p', { className: 'stc-muted' }, '使用宿主的发送、重生成、失败重试和停止按钮。生成进度及错误由宿主显示；提交后结算失败时，在宿主中重试结算。'),
               h('p', { className: 'stc-muted' }, '预设、模型与玩家设定在操作开始时冻结；生成途中保存更改只影响下一次操作。'),
               gameId ? h('div', { className: 'stc-actions' },
@@ -569,7 +599,7 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
         ctx.effect(() => ctx.slots.inject('settings.section', () => ctx.slots.register({
           name: 'settings.section', id: 'dsh-tavern-stcontext', order: 115, label: () => 'STcontext',
         }, () => h(Panel, { settingsPage: true }))), 'STcontext: settings section');
-        ui.registerPanel({ id: 'st-context', title: 'STcontext', render: ({ gameId }) => h(Panel, { gameId }) });
+        ui.registerPanel({ id: 'st-context', title: 'STcontext', render: ({ gameId, visible }) => h(Panel, { gameId, visible, manageDefaults: true }) });
         ui.registerComposerAction({
           id: 'regenerate', label: 'STcontext',
           run: async ({ gameId }) => {
