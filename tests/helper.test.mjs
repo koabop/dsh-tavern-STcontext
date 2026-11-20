@@ -8,7 +8,7 @@ import { compilePreset, inspectPreset, processOutput } from '../lib/preset.mjs';
 import { compilerMaterials } from '../lib/materials.mjs';
 import { runCompiler } from '../lib/worker-client.mjs';
 import { materials, preset } from './fixtures/materials.mjs';
-import { unavailableBackendRoutes, MAX_REPORTED_BACKEND_ROUTES } from '../lib/helper.mjs';
+import { transformHelperRequest, unavailableBackendRoutes, MAX_REPORTED_BACKEND_ROUTES } from '../lib/helper.mjs';
 
 const settings = { model: { provider: 'fixture', model: 'story' } };
 const doc = (...scripts) => ({ ...structuredClone(preset), extensions: { ...structuredClone(preset.extensions),
@@ -68,6 +68,98 @@ test('Tavern Helper events support deduplication, first/last, once, stop and asy
     eventMakeLast(e, async request => { await Promise.resolve(); request.messages.push({role:'system',content:log.join('')}); });
   `);
   assert.equal(compile(document).request.messages.at(-1).content, 'BAC');
+});
+
+test('self-contained named exports use private module bindings and run callbacks through reply replay', () => {
+  const document = doc(`
+    var moduleValue = 'module value';
+    export const example = 'export const is ordinary text here';
+    export async function start() {
+      await Promise.resolve();
+      eventOn(tavern_events.CHAT_COMPLETION_SETTINGS_READY, r => r.messages.push({role:'system',content:moduleValue}));
+      eventOn(tavern_events.MESSAGE_RECEIVED, i => SillyTavern.getContext().chat[i].mes += ':' + moduleValue);
+    }
+    export { start as activate };
+    await start();
+  `, "if ('moduleValue' in globalThis) throw Error('module binding leaked');");
+  const compiled = compile(document);
+  assert.equal(compiled.request.messages.at(-1).content, 'module value');
+  assert.equal(output(document, compiled, { text: 'reply' }).text, 'reply:module value');
+  for (const source of ["export { value } from './external.mjs';",
+    "import value from './external.mjs'; export { value };", "export const value = () => import('./external.mjs');"]) {
+    assert.ok(inspectPreset(doc(source)).blockers.some(message => /本地命名导出|导入外部依赖/.test(message)));
+  }
+});
+
+test('after-data exposes the actual player input, preserves legacy wire access, and runs before settings', () => {
+  const document = doc(`
+    let promptReference;
+    let savedInput;
+    let stage = '';
+    eventOn(tavern_events.CHAT_COMPLETION_PROMPT_READY, event => {
+      stage += 'P';
+      event.chat = event.chat.map(message => ({...message})).reverse();
+      if (JSON.stringify(event.chat).includes('is_user')) throw Error('source leaked into a prompt snapshot');
+    });
+    eventOn(tavern_events.GENERATE_AFTER_DATA, (data, dryRun) => {
+      if (dryRun !== false || data.messages !== data.prompt) throw Error('invalid data');
+      const snapshot = structuredClone(data);
+      if (!Object.hasOwn(data, 'prompt') || !Object.hasOwn(data, 'messages') || snapshot.messages[0].content !== snapshot.prompt[0].content)
+        throw Error('incorrect event shape');
+      const copied = data.prompt.map(row => ({...row}));
+      if (JSON.stringify(copied).includes('is_user')) throw Error('source leaked into a tool snapshot');
+      const playerRows = copied.filter(row => row.is_user === true);
+      if (playerRows.length !== 1 || playerRows[0].content !== 'player') throw Error('wrong input');
+      savedInput = Object.freeze({...playerRows[0]});
+      data.prompt = copied;
+      data.temperature = 0.6;
+      promptReference = data.messages;
+      stage += 'A';
+    });
+    eventOn(tavern_events.CHAT_COMPLETION_SETTINGS_READY, wire => {
+      if (wire.messages !== promptReference || wire.temperature !== 0.6 || 'prompt' in wire) throw Error('lost request state');
+      wire.messages.push(savedInput);
+      wire.messages.push({role:'system', content:stage + 'S'});
+    });
+  `);
+  const wire = { messages: [
+    { role: 'user', content: 'worldbook' }, { role: 'user', content: 'player' }, { role: 'user', content: 'depth injection' },
+  ], model: 'story', max_tokens: 32 };
+  const transformed = transformHelperRequest(document, wire, { inputMessageIndex: 1 });
+  assert.equal(transformed.wire.messages.at(-1).content, 'PAS');
+  assert.equal(transformed.wire.temperature, 0.6);
+  assert.ok(transformed.wire.messages.every(m => !Object.hasOwn(m, 'is_user')));
+  assert.ok(!Object.hasOwn(transformed.wire, 'prompt'));
+  assert.equal(output(document, { request: {}, helperState: transformed.helperState }, { text: 'reply' }).text, 'reply');
+});
+
+test('in-flight v1 receipts replay their original settings and after-data order', () => {
+  const document = doc(`
+    eventOn('generate_after_data', r => { r.messages[0].content += '[after]'; });
+    eventOn('chat_completion_settings_ready', r => { r.messages[0].content += '[settings]'; });
+  `);
+  const compiled = compile(document);
+  assert.equal(compiled.helperState.version, 2);
+  const expected = JSON.parse(compiled.helperState.expected);
+  assert.ok(expected.messages[0].content.endsWith('[after][settings]'));
+  expected.messages[0].content = expected.messages[0].content.replace('[after][settings]', '[settings][after]');
+  const prior = { ...compiled, helperState: { ...compiled.helperState, version: 1, expected: JSON.stringify(expected) } };
+  assert.equal(output(document, prior, { text: 'prior reply' }).text, 'prior reply');
+});
+
+test('after-data EJS edits respect frozen message identity and replay', () => {
+  const document = doc(`eventOn(tavern_events.GENERATE_AFTER_DATA, d => {
+    replaceVariables({phase:'prepared'});
+    d.prompt = d.prompt.filter(row => !row.content.includes('DROP_EJS')).reverse();
+  });`);
+  document.prompts[1].content = '<%= getLocalVar("phase") %>';
+  document.prompts[2].content = 'DROP_EJS <%= unknown() %>';
+  const compiled = compile(document);
+  assert.ok(compiled.request.messages.some(m => m.content === 'prepared'));
+  assert.equal(output(document, compiled, { text: 'reply' }).text, 'reply');
+  document.extensions.tavern_helper.scripts[0].content =
+    "eventOn(tavern_events.GENERATE_AFTER_DATA,d=>{ d.prompt = d.prompt.map(m=>({...m})); });";
+  assert.throws(() => compile(document), /无法确认模板来源/);
 });
 
 test('helper macro registration resolves deferred preset macros without touching frozen text', () => {
@@ -192,15 +284,20 @@ test('original Kunlun script works under a different name and fingerprint withou
   assert.equal(compiled.report.protocol, 'spreset');
   assert.ok(compiled.request.tools[0].description.includes(data.history.at(-1).text));
   assert.ok(compiled.request.tools[0].description.includes(data.input.projected.trim()));
-  const name = compiled.request.tools[0].name;
-  assert.equal(output(document, compiled, { toolCalls: [{ name, arguments: '{"buffer_content":"正文"}' }] }).text, '正文');
+  const { name, parameters } = compiled.request.tools[0];
+  assert.equal(parameters.required.length, 1);
+  const args = { [parameters.required[0]]: '正文' };
+  assert.equal(output(document, compiled, { toolCalls: [{ name, arguments: JSON.stringify(args) }] }).text, '正文');
 });
 
 test('original mixed helper and its panel compile tool and text deliveries independently', { skip: !process.env.STCONTEXT_WAVE_FIXTURE }, async () => {
   const document = JSON.parse(await readFile(process.env.STCONTEXT_WAVE_FIXTURE, 'utf8'));
-  for (const script of document.extensions.tavern_helper.scripts) script.name = 'renamed helper';
+  for (const script of document.extensions.tavern_helper.scripts) {
+    script.name = 'renamed helper';
+    script.content += '\n// edited export';
+  }
   const compiled = compile(document);
-  assert.ok(compiled.report.scripts.some(script => script.kind === 'ui-only'));
+  assert.ok(compiled.report.scripts.filter(script => script.supported === 'restricted').length >= 2);
   assert.ok(compiled.request.tools.find(tool => tool.name === 'wave_context_reference').description.includes(materials.input.text));
   const response = { toolCalls: [{ id: 'reply', name: 'actual_content', arguments: '{"content":"交付的故事"}' }] };
   assert.equal(output(document, compiled, response).text, '交付的故事');

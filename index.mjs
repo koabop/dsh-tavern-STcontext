@@ -70,7 +70,7 @@ export function apply(ctx) {
     const entry = { json: preview(), report, createdAt: Date.now() };
     previews.set(materials.gameId, entry);
     while (previews.size > 3) previews.delete(previews.keys().next().value);
-    const response = await generateBody({ request: compiled.request, signal });
+    const response = await generateBody({ request: compiled.request, reverieSystemPrompt: compiled.reverieSystemPrompt, signal });
     signal?.throwIfAborted();
     const result = await runCompiler('output', { document: active.document, response, helperState: compiled.helperState, projectDisplay: false,
       toolNames: (compiled.request.tools || []).map(tool => tool.name) }, { signal });

@@ -23,7 +23,7 @@
 
 当前自动生成接口只支持文本输入；本轮带附件时会明确报错，不会忽略附件继续生成。
 
-模型选择与预算使用 DSH 0.2.1 的 `llm.prepareCall`、`listProviders`、`listModels`，可选复用 `tokenMeter`。普通请求由 DSH 发送；强制工具选择或签名请求使用插件内的兼容发送接口，还需要公开的 `listConfigurableProviders`、`settings.describe` 和 API Key 凭据解析服务。在 STcontext 面板独立选择服务商下的文本模型及其支持的推理强度，模型地址和凭据沿用 DSH 已配置的服务商。插件保存自己的选择，正文生成和重生成均使用该模型，不随前台或后台模型切换。插件负责预算检查、取消和响应校验，宿主负责正文生命周期和结算。
+在 STcontext 面板选择正文模型及其支持的推理强度，生成和重生成均使用此设置。模型选择与预算使用 DSH 的 `llm.prepareCall`、`listProviders`、`listModels`，可选复用 `tokenMeter`。普通请求由 DSH 发送。若预设只额外要求停止串，DSH 的 `deepseek-official` 和 `deepseek-account` 可直接传递。其他服务商的停止串，以及强制工具选择或签名请求，使用下文的 OpenAI 或 Gemini 兼容发送接口，需要公开的 `listConfigurableProviders`、`settings.describe` 和相应的认证配置。插件负责预算检查、取消和响应校验，宿主负责正文生命周期和结算。
 
 从 0.2.x 升级后，原有的前台/后台跟随设置需要在面板重新选择并保存。没有选择模型时不会发送正文请求；已选模型不可用时直接报错，不自动切换。模型列表可单独刷新；个别服务商读取失败不会影响其他服务商的模型选择。
 
@@ -80,10 +80,11 @@ Copy-Item -LiteralPath '.\lib' -Destination $stcontextTarget -Recurse -Force
 ## 兼容范围
 
 - ST 聊天补全的 100001 顺序、启用项、角色、材料 marker 和深度提示词。上游 `reason=normal` 使用 `normal`，`regenerate/retry` 使用 `regenerate`；非空 `injection_trigger` 必须包含当前类型才生效。
-- 局部 setvar/getvar、基本变量操作、user/char、注释、random/roll、嵌套宏，以及 lastUserMessage/lastCharMessage/lastMessage/lastMessageId。聊天宏只读取本次冻结的可见历史与输入；替换进去的文本不会再次执行宏。全局变量宏也只在本次编译内共享，不读写宿主状态。
+- 支持局部 setvar/getvar、块式 setvar、if/else、基本变量操作、user/char、注释、random/roll、嵌套宏，以及 lastUserMessage/lastCharMessage/lastMessageId。聊天宏只读取本次冻结的可见历史与输入；替换进去的文本不会再次执行宏。全局变量宏也只在本次编译内共享，不读写宿主状态。
 - 原生 `extensions.regex_scripts`；SPreset RegexBinding 只保留原数据，不重复执行。
 - 只有 SPreset 一条执行路径：ST 基础组装 → 可选的 SPreset 处理函数 → 受限助手事件与请求拦截 → 模型调用 → 助手回包处理与 SPreset 输出格式化。普通 ST 预设的扩展阶段为空操作。具体接口和限制见 [兼容契约](docs/compatibility.md)。
 - 昆仑 IDE 1.2r 直接运行导入文件里的助手脚本，支持工具描述承载上下文及 buffer_content 解包；已删除按脚本指纹解析模板的昆仑专用适配器。测试覆盖更改脚本名称和指纹后的同一行为。
+- **Reverie 1.2** 默认剧情可使用原文件。插件读取命定预设助手 v3.18.1 已保存的字数、人称和语言等设置，运行文件内的「消息后处理」脚本，并向模型传递 `Participant:` 停止串。使用时保持输入噪声关闭，选择非工具尾部。远程助手面板、场外讨论和独立辅助生成超出当前支持范围。[设置与限制](docs/compatibility.md#reverie-12-默认剧情)
 - 面板不再提供模式选择；旧 adapter 设置自动忽略并在下次保存时移除。不支持的内嵌扩展会报错，不回退到忽略扩展的路径。
 - 支持助手事件、registerMacroLike、本次临时变量、ready/pagehide 生命周期及虚拟 fetch。fetch 只在 QuickJS 内处理一次生成请求/完整回包，没有网络能力，不修改宿主全局 fetch。已知 SPreset 引擎加载器按完整内容指纹映射到内置接口；其他远程加载、DOM 操作、日志上传和工具 action 不执行。
 
@@ -97,13 +98,13 @@ Copy-Item -LiteralPath '.\lib' -Destination $stcontextTarget -Recurse -Force
 
 宿主导出有效分支的可见历史。插件按预设的角色、正则顺序和本次消息深度准备发送文本。旧楼层可以只发送摘要，或从请求中省略。人物、世界书与聊天使用宿主已解析的材料，旧楼层里的字面宏或 EJS 不会再次执行。
 
-为保留长对话的公共请求前缀，动态世界书、写作要求与本轮状态放在完整历史之后、本轮输入之前，以带来源标题的 `user` 材料消息发送。宿主明确标记的固定世界书仍按 `worldInfoAfter` 占位项及缺失补入规则排列；固定与动态内容已混合的世界书整段后移，不猜测拆分。材料保持完整，不作为新增楼层写入历史，也不修改导入预设及其提示词角色。预设脚本仍可改写最终顺序和角色，服务商缓存命中不作保证；具体规则见[兼容契约](docs/compatibility.md)。
+为保留长对话的公共请求前缀，插件先把动态世界书、写作要求与本轮状态放在完整历史之后、本轮输入之前。通常使用带来源标题的 `user` 材料消息。Reverie 1.2 使用 `system` 材料消息，供「消息后处理」脚本将它们移入预设的上下文槽位。宿主明确标记的固定世界书仍按 `worldInfoAfter` 占位项及缺失补入规则排列；固定与动态内容已混合的世界书整段后移，不猜测拆分。材料保持完整，不作为新增楼层写入历史，也不修改导入预设及其提示词角色。预设脚本仍可改写最终顺序和角色，服务商缓存命中不作保证；具体规则见[兼容契约](docs/compatibility.md)。
 
 写入规则在解码模型回包后执行一次。显示规则交给宿主展示当前消息，发送规则在组装后续请求时从楼层源文重新计算。两个目标都勾选的规则在两个通道各自生效。旧存档如果仅存有美化 HTML 或已丢失摘要，插件沿用仍可获得的历史。
 
 启用的 SPreset 和助手请求钩子可以在本轮请求副本中整理正文、编码材料、合并历史或写入工具说明。请求预览显示实际编译结果；格式化器可从完整工具回包中恢复正文。插件不将显示模板写入模型历史。
 
-每个处理阶段使用新的受限运行时，只通过 JSON 传入数据。默认 SPreset 函数 500 ms，整组助手脚本每阶段 1800 ms、最多 32 个；64 MiB JS 堆、1024 KiB 栈，输入/输出及最终请求各最多 8 MiB。普通助手脚本单脚本最多 256 KiB；包含 UI/DOM 挂载与生成期钩子/ToolManager 的打包型助手脚本单脚本最多 4 MiB，其浏览器 UI 与定时器以惰性内存桩运行，仅生效生成期事件、ToolManager 工具与回复后处理。助手回包阶段用冻结输入、固定时间和随机序列重建请求上下文，逐字验证与编译时捕获的请求相同，再交付完整回包；重放不产生模型调用。外围 Worker 保留编译 20 秒、输出 5 秒超时与取消。网络、文件、进程、模块加载、定时器、宿主 API 和凭据不暴露给脚本。预算在最终改写后按实际消息和工具重新计算。
+每个处理阶段使用新的受限运行时，只通过 JSON 传入数据。默认 SPreset 函数 500 ms，整组助手脚本每阶段 1800 ms、最多 32 个；64 MiB JS 堆、1024 KiB 栈，输入/输出及最终请求各最多 8 MiB。普通助手脚本单脚本最多 512 KiB；包含 UI/DOM 挂载与生成期钩子/ToolManager 的打包型助手脚本单脚本最多 4 MiB，其浏览器 UI 与定时器以惰性内存桩运行，仅生效生成期事件、ToolManager 工具与回复后处理。助手回包阶段用冻结输入、固定时间和随机序列重建请求上下文，逐字验证与编译时捕获的请求相同，再交付完整回包；重放不产生模型调用。外围 Worker 保留编译 20 秒、输出 5 秒超时与取消。网络、文件、进程、模块加载、定时器、宿主 API 和凭据不暴露给脚本。预算在最终改写后按实际消息和工具重新计算。
 
 插件在隔离的 QuickJS 环境执行预设生成相关逻辑。脚本菜单、控制台和外部服务不随插件加载。消息里的 HTML 面板由宿主隔离渲染，其外观和交互取决于宿主支持的前端接口。
 
@@ -114,6 +115,8 @@ Copy-Item -LiteralPath '.\lib' -Destination $stcontextTarget -Recurse -Force
 ## 验证
 
 真实样本可通过环境变量指定。`STCONTEXT_LYRA_FIXTURE` 覆盖天琴座的行动面板与深度 9/10 历史切换；`STCONTEXT_WAVE_FIXTURE` 覆盖浪潮的工具及文本输出；`STCONTEXT_MEOWSSIAH_FIXTURE` 覆盖猫神 2.1 的连续两轮工具历史。样本保存在本机，测试使用固定回包。
+
+将 `STCONTEXT_REVERIE_FIXTURE` 指向 Reverie 1.2 原文件后，运行 `node --test tests/plugin.test.mjs tests/protocol.test.mjs` 可验证导入、默认剧情生成和重生成。测试检查当前玩家输入、动态材料、停止串、聊天显示，以及深度 10 发送旧正文、深度 11 切换为摘要。协议测试还检查 OpenAI 保留三段原消息，以及 Gemini 按 SillyTavern 的顺序合并尾部文本。模型使用固定回包。
 
 运行 `npm test`。可选设置 `STCONTEXT_PRESET_FIXTURE` 为本地预设路径后运行测试，会验证该文件的请求编译与一次输出正则；测试不会发送模型请求，也不会把该文件复制进仓库。
 

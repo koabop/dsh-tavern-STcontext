@@ -351,7 +351,7 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
                     !isMarker && select('注入位置', String(prompt.injection_position ?? 0), [['0', '相对位置 · 按列表顺序'], ['1', '聊天内 · 指定深度']], value => patchPrompt('injection_position', Number(value))),
                     !isMarker && Number(prompt.injection_position) === 1 && h('div', { className: 'stc-grid' },
                       field('注入深度', prompt.injection_depth ?? 0, value => patchPrompt('injection_depth', numberValue(value)), { type: 'number', min: 0, step: 1 }),
-                      field('同深度顺序', prompt.injection_order ?? 0, value => patchPrompt('injection_order', numberValue(value)), { type: 'number', min: 0, step: 1 })),
+                      field('同深度顺序', prompt.injection_order ?? 0, value => patchPrompt('injection_order', numberValue(value)), { type: 'number', step: 1 })),
                     h('div', { className: 'stc-row' }, button('复制条目', () => addPrompt(true), isMarker),
                       button('从当前顺序移除', () => changeDocument(next => { orderOf(next).order = orderOf(next).order.filter(item => item.identifier !== prompt.identifier); }), !inOrder)),
                     h('p', { className: 'stc-muted' }, '移出顺序后仍保留条目及扩展引用；勾选可重新加入。永久删除或编辑扩展请使用完整 JSON。'))

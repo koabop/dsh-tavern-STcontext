@@ -8,7 +8,7 @@ import { validateRequestProtocol, toolPolicy } from '../lib/request.mjs';
 import { createDshGeneration } from '../lib/generation.mjs';
 import { compilePreset, processOutput } from '../lib/preset.mjs';
 import { compilerMaterials } from '../lib/materials.mjs';
-import { materials } from './fixtures/materials.mjs';
+import { materials, preset as basePreset } from './fixtures/materials.mjs';
 
 const signature = 'skip_thought_signature_validator';
 const tool = { name: 'story', description: '完整材料', parameters: { type: 'object', properties: { body: { type: 'string' } } } };
@@ -88,9 +88,11 @@ test('unsigned tool history uses native DSH blocks without tool execution or dyn
 
 test('OpenAI dispatch preserves exact history/signatures and converts forced choice without fallback', async () => {
   const h = harness(), r = request();
+  r.stop = ['Participant:'];
   const result = await h.run({ request: r });
   assert.equal(h.sent.length, 1);
   assert.deepEqual(h.sent[0].json.messages, r.messages);
+  assert.deepEqual(h.sent[0].json.stop, r.stop);
   assert.deepEqual(h.sent[0].json.tool_choice, { type: 'function', function: { name: 'story' } });
   assert.equal(h.sent[0].json.toolConfig, undefined);
   assert.equal(h.sent[0].json.max_tokens, 256);
@@ -104,6 +106,7 @@ test('OpenAI dispatch preserves exact history/signatures and converts forced cho
 
 test('Gemini dispatch maps historical tool calls/results and signature to native parts', async () => {
   const h = harness({ api: 'google-generative-ai' }), r = request();
+  r.stop = ['Participant:'];
   r.messages[0] = { role: 'assistant', content: '', thoughtSignature: signature };
   const result = await h.run({ request: r });
   const body = h.sent[0].json, parts = body.contents.flatMap(c => c.parts);
@@ -112,9 +115,100 @@ test('Gemini dispatch maps historical tool calls/results and signature to native
   assert.deepEqual(parts.find(p => p.functionResponse).functionResponse, { id: 'call_one', name: 'story', response: { ok: true } });
   assert.deepEqual(parts[0], { text: '', thoughtSignature: signature });
   assert.deepEqual(body.toolConfig, r.toolConfig);
+  assert.deepEqual(body.generationConfig.stopSequences, r.stop);
   assert.equal(h.sent[0].headers.get('x-goog-api-key'), 'synthetic-test-key');
   assert.equal(body.generationConfig.maxOutputTokens, 256);
   assert.deepEqual(result.toolCalls[0].arguments, { body: '新正文' });
+});
+
+test('Gemini converts only a recognized Reverie plain system/user/system prompt in place', () => {
+  const input = { messages: [{ role: 'system', content: '开头' }, { role: 'user', content: '玩家' }, { role: 'system', content: '尾部' }],
+    stop: ['Participant:'] };
+  const controls = { model: 'gemini', maxTokens: 512 };
+  const route = { api: 'google-generative-ai', reverieSystemPrompt: true };
+  const body = buildProtocolBody(route, input, controls);
+  assert.deepEqual(body.systemInstruction, { parts: [{ text: '开头' }] });
+  assert.deepEqual(body.contents, [{ role: 'user', parts: [{ text: '玩家\n\n尾部' }] }]);
+  assert.deepEqual(body.generationConfig.stopSequences, input.stop);
+  assert.ok(!Object.hasOwn(body, 'reverieSystemPrompt'));
+  assert.deepEqual(buildProtocolBody({ ...route, api: 'openai-completions' }, input, controls).messages, input.messages);
+  assert.throws(() => buildProtocolBody({ api: route.api }, input, controls), /中途的 system/);
+  assert.throws(() => buildProtocolBody(route, { ...input, tools: [tool] }, controls), /中途的 system/);
+  assert.throws(() => buildProtocolBody(route, { ...input, messages: [...input.messages, input.messages[1]] }, controls), /中途的 system/);
+  assert.throws(() => validateRequestProtocol({ ...input, reverieSystemPrompt: true }), /不支持请求字段/);
+});
+
+test('original Reverie maps its three default messages through the configured Gemini transport', {
+  skip: !process.env.STCONTEXT_REVERIE_FIXTURE,
+}, async () => {
+  const document = JSON.parse(await readFile(process.env.STCONTEXT_REVERIE_FIXTURE, 'utf8'));
+  const compile = doc => compilePreset(doc, compilerMaterials(materials), { model: request().model });
+  const compiled = compile(document), messages = structuredClone(compiled.request.messages);
+  assert.equal(compiled.reverieSystemPrompt, true);
+  assert.deepEqual(messages.map(message => message.role), ['system', 'user', 'system']);
+  assert.ok(!Object.hasOwn(compiled.request, 'reverieSystemPrompt'));
+  const h = harness({ api: 'google-generative-ai', reply: { candidates: [{ finishReason: 'STOP', content: { parts: [{ text: '模拟正文' }] } }] } });
+  assert.equal((await h.run(compiled)).text, '模拟正文');
+  assert.deepEqual(h.sent[0].json.systemInstruction.parts, [{ text: messages[0].content }]);
+  assert.deepEqual(h.sent[0].json.contents, [{ role: 'user', parts: [{ text: messages[1].content + '\n\n' + messages[2].content }] }]);
+  assert.deepEqual(h.sent[0].json.generationConfig.stopSequences, ['Participant:']);
+  const chat = harness({ reply: openai({ finish_reason: 'stop', message: { role: 'assistant', content: '模拟正文' } }) });
+  assert.equal((await chat.run(compiled)).text, '模拟正文');
+  assert.deepEqual(chat.sent[0].json.messages, messages);
+  assert.deepEqual(chat.sent[0].json.stop, ['Participant:']);
+  assert.deepEqual(compiled.request.messages, messages);
+  assert.equal(compile({ ...document, use_sysprompt: false }).reverieSystemPrompt, undefined);
+  assert.equal(compile({ ...basePreset, use_sysprompt: true }).reverieSystemPrompt, undefined);
+});
+
+test('a helper stop sequence survives compilation, response replay and a text-only provider request', async () => {
+  const document = structuredClone(basePreset);
+  document.extensions.tavern_helper = { scripts: [{ enabled: true, name: 'stop', content:
+    "eventOn(tavern_events.CHAT_COMPLETION_SETTINGS_READY, data => { data.stop = ['Participant:', '', 'Participant:', '\\n']; });" }] };
+  const compiled = compilePreset(document, compilerMaterials(materials), { model: request().model });
+  assert.deepEqual(compiled.request.stop, ['Participant:', '\n']);
+  const output = processOutput({ document, helperState: compiled.helperState, response: { text: '正文' } });
+  assert.equal(output.sourceText, '正文');
+  const plan = compiled.request;
+  for (const api of ['openai-completions', 'google-generative-ai']) {
+    const reply = api === 'openai-completions' ? openai({ finish_reason: 'stop', message: { role: 'assistant', content: '正文' } })
+      : { candidates: [{ finishReason: 'STOP', content: { role: 'model', parts: [{ text: '正文' }] } }] };
+    const h = harness({ api, reply });
+    assert.equal((await h.run({ request: plan })).text, '正文');
+    const body = h.sent[0].json;
+    assert.deepEqual(api === 'openai-completions' ? body.stop : body.generationConfig.stopSequences, plan.stop);
+    assert.equal(body.tools, undefined);
+    assert.equal(h.counts().nativeCalls, 0);
+  }
+  const unsupported = harness({ api: 'openai-responses' });
+  await assert.rejects(unsupported.run({ request: plan }), /停止串/);
+  assert.equal(unsupported.sent.length, 0);
+  assert.equal(unsupported.counts().credentialReads, 0);
+});
+
+test('empty stop controls preserve ordinary routes and native DeepSeek receives the exact nonempty controls', async () => {
+  const sent = [];
+  const run = createDshGeneration({ llm: { async prepareCall(config, signal, configure) {
+    const { provider, model, ...controls } = config;
+    return { config: { provider, model, ...configure(controls, { context: { contextWindow: 16000 } }) }, async *stream(options) {
+      sent.push(options);
+      yield { type: 'text-delta', text: '正文' };
+      yield { type: 'finish', reason: { kind: 'stop' } };
+    } };
+  } } });
+  for (const [provider, stop, expected] of [
+    ['configured', null, undefined], ['configured', [], undefined], ['configured', ['', ''], undefined],
+    ['deepseek-account', 'Participant:', ['Participant:']], ['deepseek-official', ['\n', ' END '], ['\n', ' END ']],
+  ]) {
+    const plan = { messages: [{ role: 'user', content: '继续' }], model: { provider, model: 'story-model' }, stop };
+    assert.equal((await run({ request: plan })).text, '正文');
+    assert.deepEqual(sent.at(-1).stop, expected);
+  }
+  const document = structuredClone(basePreset);
+  document.extensions.SPreset = { FinalRequestProcessing: { enabled: true, script: '({request}) => ({...request, stop: []})' } };
+  assert.ok(!Object.hasOwn(compilePreset(document, compilerMaterials(materials)).request, 'stop'));
+  document.extensions.SPreset.FinalRequestProcessing.script = '({request}) => ({...request, stop: ["ok", 3]})';
+  assert.throws(() => compilePreset(document, compilerMaterials(materials)), /stop 停止串/);
 });
 
 test('standard OpenAI format and known inactive defaults do not block signed tool requests', async () => {
@@ -278,9 +372,11 @@ test('actual HTTP request carries the complete extended protocol once', async t 
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
   const h = harness({ fetchImpl: globalThis.fetch, profile: { baseURL: 'http://127.0.0.1:' + server.address().port + '/v1' } });
-  await h.run({ request: request() });
+  const plan = { ...request(), stop: ['Participant:'] };
+  await h.run({ request: plan });
   assert.equal(received.length, 1); assert.equal(received[0].url, '/v1/chat/completions');
-  assert.deepEqual(received[0].json.messages, request().messages);
+  assert.deepEqual(received[0].json.messages, plan.messages);
+  assert.deepEqual(received[0].json.stop, plan.stop);
   assert.equal(received[0].headers.authorization, 'Bearer synthetic-test-key');
 });
 
@@ -362,8 +458,12 @@ test('original Meowssiah compiles, dispatches both protocol bodies and formats t
     const body = h.sent[0].body;
     for (const row of materials.history) assert.ok(body.includes(row.text));
     assert.ok(body.includes(signature));
-    if (api === 'openai-completions') assert.equal(h.sent[0].json.tool_choice, 'required');
-    else assert.equal(h.sent[0].json.toolConfig.functionCallingConfig.mode, 'ANY');
+    const allowed = compiled.request.toolConfig?.functionCallingConfig?.allowedFunctionNames ?? compiled.request.tools.map(t => t.name);
+    if (api === 'openai-completions') {
+      // Some releases declare a context tool but allow only the story tool for this reply.
+      const choice = allowed.length === 1 ? { type: 'function', function: { name: allowed[0] } } : 'required';
+      assert.deepEqual(h.sent[0].json.tool_choice, choice);
+    } else assert.deepEqual(h.sent[0].json.toolConfig.functionCallingConfig, { mode: 'ANY', allowedFunctionNames: allowed });
     const output = processOutput({ document, response, helperState: compiled.helperState, toolNames: compiled.request.tools.map(t => t.name) });
     assert.ok(output.text.includes('完整测试正文'));
   }

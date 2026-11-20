@@ -45,6 +45,42 @@ test('older hosts keep narrative sources clean when display projection is unavai
   assert.ok((await f.call('request', { gameId: 'test' })).report.warnings.some(value => value.includes('未美化')));
 });
 
+test('Reverie 1.2 imports and replays its default story pipeline with a mock model', {
+  skip: !process.env.STCONTEXT_REVERIE_FIXTURE,
+}, async () => {
+  const f = fixture();
+  const doc = JSON.parse(await readFile(process.env.STCONTEXT_REVERIE_FIXTURE, 'utf8'));
+  await importPreset(f, doc);
+  await f.call('settings', { model: { provider: 'deepseek-official', model: 'offline-story' } });
+  const literalInput = '保留 {{user}}、<|命定_记忆区|> 和 <|placeholder|>。';
+  const oldStory = '她把蓝色信封交给了我。', summary = '她递交了信件。';
+  const source = '<recorder_output><recorder_thinking>模拟思考</recorder_thinking><recorder_body>' +
+    '<tp>早晨</tp><gametxt>' + oldStory + '</gametxt><summary>' + summary + '</summary></recorder_body></recorder_output>';
+
+  for (const [reason, depth] of [['normal', 10], ['regenerate', 11]]) {
+    const history = [{ role: 'assistant', text: source, turn: 1 },
+      ...Array.from({ length: depth - 1 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', text: i % 2 ? '后续事件' : '旧玩家发言' }))];
+    const config = await f.generator.prepare({ reason, gameId: 'test', signal: new AbortController().signal });
+    const reply = await f.generate(request => {
+      assert.deepEqual(request.stop, ['Participant:']);
+      const text = request.messages.map(m => m.content[0].text).join('\n');
+      assert.equal(text.split('<Participant_input>').length - 1, 1);
+      assert.ok(text.includes('<Participant_input>\n' + literalInput + '\n</Participant_input>'));
+      assert.equal(text.split('<|命定_记忆区|>').length - 1, 1);
+      assert.equal(text.split('<|placeholder|>').length - 1, 1);
+      assert.doesNotMatch(text, /旧玩家发言|Participant: 【本轮|<\|命定_(?:正文|历史|深度)|<\|(?:人称|字数要求|女性体型池)\|>|\{\{general_prompt_noise\}\}/);
+      for (const value of ['激活世界书', '写作规范', '输入处理后的状态', '不少于1500', '简体中文', '第三人称']) assert.ok(text.includes(value), value);
+      assert.equal(text.includes(oldStory), depth === 10);
+      assert.equal(text.includes(summary), depth === 11);
+      return { text: source };
+    }, config, { ...materials, reason, input: { raw: literalInput, text: literalInput }, history });
+    assert.ok(reply.text.includes(oldStory) && reply.text.includes(summary));
+    assert.ok(!reply.text.includes('模拟思考'));
+    assert.ok(displayed(reply).includes('<details><summary>摘要</summary>'));
+  }
+  assert.equal(f.requests, 2);
+});
+
 function fixture(capability = 1, apiVersion = 7, sharedPresets = {}) {
   let saved, generator, respond, requests = 0;
   const handlers = new Map();
