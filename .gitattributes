@@ -1,2 +1,6 @@
 * text=auto eol=lf
 *.wasm binary
+/.github export-ignore
+/scripts export-ignore
+/tests export-ignore
+/package-lock.json export-ignore
