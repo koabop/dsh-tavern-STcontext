@@ -1,9 +1,13 @@
 {
   "name": "dsh-tavern-STcontext",
-  "version": "0.8.1",
+  "version": "0.8.2",
   "private": true,
   "type": "module",
   "description": "导入 SillyTavern 预设，使用完整可见历史生成或重生成正文。",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/koabop/dsh-tavern-STcontext.git"
+  },
   "exports": {
     ".": "./index.mjs",
     "./client": "./client.js"
@@ -17,6 +21,9 @@
     "node": ">=22.19.0"
   },
   "dsh": {
+    "compatibility": {
+      "tavernApiVersion": 7
+    },
     "client": {
       "platform": "web",
       "inject": [

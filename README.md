@@ -4,20 +4,22 @@
 
 ## 安装与使用
 
-从 0.4.0 起面向 [flizzywine/dsh-tavern 上游](https://github.com/flizzywine/dsh-tavern)，需要包含正文生成扩展点的版本（首次实现于 `09620ebe`）。上游插件 API 为 7，插件检查 `capabilities.bodyGeneration === 1` 并统一注册 `bodyGenerator({ prepare, generate })`；不使用旧 fork 的 API 8 或独立重生成任务接口。仅修改宿主工作区代码不会更新已安装的 Profile，须先更新实际使用的宿主并重启。
+STcontext v0.8.2 支持 Tavern 插件 API 7 及以上。生成正文还需要宿主提供 `capabilities.bodyGeneration === 1` 和 `bodyGenerator({ prepare, generate })`。更新实际使用的 Tavern Profile 后，请重启酒馆。[上游正文生成接口](https://github.com/flizzywine/dsh-tavern/commit/09620ebe)
+
+使用附带 STcontext 的 Tavern 发行包时，在「设置 → DSH Tavern → 插件」启用 STcontext。首次随包安装默认停用，启用后仍可自行选择正文生成方式。已有同名安装的用户可以沿用原来的预设、模型和本局设置。
 
 在 STcontext 面板导入预设、选择正文模型并保存后，从酒馆侧栏「＋ → 插件 → STcontext」打开独立页，在「正文生成默认设置」中选择：
 
 - **由 STcontext 直接生成**：宿主准备材料后直接调用插件，不额外请求前台模型。
 - **前台检索后由 STcontext 生成**：前台模型先查询世界书，再由插件生成正文，会产生额外的前台模型请求。
 
-新版宿主的插件页与「设置 → DSH Tavern → 剧情」共用正文默认设置，已有选择会直接显示。旧版宿主继续在「设置 → DSH Tavern → 剧情」选择 STcontext 和生成方式。
+宿主提供 `capabilities.bodyGenerationDefaults === 1` 和 `bodyGenerationDefaults()` 时，独立页与「设置 → DSH Tavern → 剧情」共用同一份正文默认设置。独立页还可以取消以 STcontext 作为默认生成器。旧版宿主继续在「设置 → DSH Tavern → 剧情」选择 STcontext 和生成方式。
 
 本局设置可以覆盖全局选择。正常发送、最新正文重生成和失败输入重试均使用宿主原有按钮，停止也由宿主控制。插件面板不再提供独立的开始、取消和任务状态轮询，保留预设设置、模型选择和请求预览。
 
 宿主支持共享预设时，可在 STcontext 的「当前预设」下拉框中从「DSH Tavern 预设库」选择已有的 SillyTavern 预设，也可以选择「跟随本局宿主预设」。预设只需导入宿主一次，在宿主预设库修改后，插件会在下一次生成或重生成读取最新内容。生成模型仍在 STcontext 中设置。旧版宿主可以继续在插件中导入 JSON。
 
-支持双通道正文的宿主分别保存源文、聊天显示和模型历史。可在 STcontext 的「正文生成默认设置」中开启「追加宿主正则」，宿主规则随后分别作用于显示和模型层。旧版宿主在剧情设置中提供相同的开关。缺少双通道能力的旧宿主显示源文，生成预览会提示这一限制。
+支持双通道正文的宿主分别保存源文、聊天显示和模型历史。可在 STcontext 的「正文生成默认设置」中开启「追加宿主正则」，宿主规则随后分别作用于显示和模型层。旧版宿主若支持追加正则，可在剧情设置中开启。缺少双通道能力的旧宿主显示源文，生成预览会提示这一限制。
 
 插件正文一次性显示。插件不可用、生成失败或完整上下文超限时明确报错，不回退到宿主生成。正文提交后的结算仍由宿主完成。宿主在操作开始时通过 `prepare` 冻结预设、模型及采样配置，正常轮次在前台检索之前冻结；生成期间切换或移除预设、修改模型只影响后续操作。已有预设及独立模型设置无需转换，保留插件数据即可。
 
@@ -37,7 +39,7 @@
 $stcontextDshRoot = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $env:USERPROFILE '.dsh' }
 $stcontextTarget = Join-Path $stcontextDshRoot 'profile-data\tavern\data\plugins\dsh-tavern-STcontext'
 New-Item -ItemType Directory -Force -Path $stcontextTarget | Out-Null
-Copy-Item -LiteralPath '.\package.json', '.\index.mjs', '.\client.js' -Destination $stcontextTarget -Force
+Copy-Item -LiteralPath '.\package.json', '.\index.mjs', '.\client.js', '.\NOTICE' -Destination $stcontextTarget -Force
 Copy-Item -LiteralPath '.\lib' -Destination $stcontextTarget -Recurse -Force
 ```
 
@@ -45,7 +47,7 @@ Copy-Item -LiteralPath '.\lib' -Destination $stcontextTarget -Recurse -Force
 
 如果 0.2.0 在导入时提示“没有名为 dsh-tavern-stcontext/upload/begin 的插件处理函数”，请升级到 0.2.1 或更新版本并重启 Tavern。0.2.0 的宿主端依赖声明不兼容 DSH 0.2.1 的 Cordis 加载器，会导致面板已显示但宿主端未启动；刷新页面不足以重新加载宿主端。
 
-也可下载 [GitHub Release](https://github.com/koabop/dsh-tavern-STcontext/releases) 的插件 ZIP，从同一插件管理页上传安装。通过 GitHub 地址安装时，插件管理页会从上游 Release 标签检查更新。
+单独安装时，可在插件管理页输入 `koabop/dsh-tavern-STcontext`，或下载发行附件 `dsh-tavern-STcontext-vX.Y.Z.zip` 后上传。GitHub 安装可在管理页手动检查发行更新，普通 ZIP 安装可重新上传新版 ZIP。宿主附带版本的更新入口由对应宿主发行包提供。[GitHub Releases](https://github.com/koabop/dsh-tavern-STcontext/releases)
 
 在 DeepSeek Harness「设置 → STcontext」可直接导入预设、选择模型并保存，无需先打开游戏。需要调整生成设置或查看本次请求时，在游戏中通过侧栏「＋ → STcontext」或输入框上方的「STcontext」打开面板：
 
@@ -118,7 +120,9 @@ Copy-Item -LiteralPath '.\lib' -Destination $stcontextTarget -Recurse -Force
 
 给 `package.json` 中的版本打对应的 `v` 标签后，运行 `npm run package:release -- vX.Y.Z <输出目录>`。命令从对应 Git 提交生成可直接上传到 Tavern 的 ZIP，并输出版本、提交、文件字节数和 SHA-256。可用 `HEAD` 打包当前提交进行验证。发布时把生成的 ZIP 附到同名 GitHub Release。
 
-ZIP 包含插件入口、`lib/` 中的运行文件及许可证文件。保留 `package.json` 的包名和发行仓库地址，使 Tavern 在升级时继续识别同一个插件，并沿用已有插件数据。
+ZIP 包含 `package.json`、`index.mjs`、`client.js`、完整 `lib/` 和根目录的分发声明。DSH Tavern 获准随其官方发行包原样分发 STcontext v0.8.2，第三方许可收录于 `lib/vendor/LICENSES.txt`。[随包分发授权](NOTICE)
+
+宿主集成时保留包名 `dsh-tavern-STcontext`，以便升级后沿用同一份插件数据和生成器选择。更新来源由宿主安装记录维护，随包分发时请在宿主清单中登记上游仓库 `koabop/dsh-tavern-STcontext`、固定发行标签及 ZIP 的 SHA-256。
 
 ## 验证
 

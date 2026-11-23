@@ -17,4 +17,10 @@ jobs:
           node-version: '22.19.0'
       # The distributed plugin includes its runtime; tests must work without npm install.
       - run: npm test
-      - run: npm run package:release -- HEAD "$RUNNER_TEMP"
+      - name: Verify the installable release archive
+        run: |
+          npm run package:release -- HEAD "$RUNNER_TEMP"
+          archive="$RUNNER_TEMP/$(node -p 'const pkg = require("./package.json"); pkg.name + "-v" + pkg.version + ".zip"')"
+          unzip -tq "$archive"
+          unzip -p "$archive" NOTICE | cmp - NOTICE
+          unzip -p "$archive" lib/vendor/LICENSES.txt | cmp - lib/vendor/LICENSES.txt
