@@ -10,7 +10,8 @@
   },
   "scripts": {
     "test": "node --test tests/*.test.mjs",
-    "build:runtime": "node scripts/build-runtime.mjs"
+    "build:runtime": "node scripts/build-runtime.mjs",
+    "package:release": "node scripts/package-release.mjs"
   },
   "engines": {
     "node": ">=22.19.0"

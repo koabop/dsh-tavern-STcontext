@@ -45,7 +45,7 @@ Copy-Item -LiteralPath '.\lib' -Destination $stcontextTarget -Recurse -Force
 
 如果 0.2.0 在导入时提示“没有名为 dsh-tavern-stcontext/upload/begin 的插件处理函数”，请升级到 0.2.1 或更新版本并重启 Tavern。0.2.0 的宿主端依赖声明不兼容 DSH 0.2.1 的 Cordis 加载器，会导致面板已显示但宿主端未启动；刷新页面不足以重新加载宿主端。
 
-也可将 `package.json`、`index.mjs`、`client.js`、`lib/` 放在 ZIP 根目录，通过上述插件管理页面上传安装。
+也可下载 [GitHub Release](https://github.com/koabop/dsh-tavern-STcontext/releases) 的插件 ZIP，从同一插件管理页上传安装。通过 GitHub 地址安装时，插件管理页会从上游 Release 标签检查更新。
 
 在 DeepSeek Harness「设置 → STcontext」可直接导入预设、选择模型并保存，无需先打开游戏。需要调整生成设置或查看本次请求时，在游戏中通过侧栏「＋ → STcontext」或输入框上方的「STcontext」打开面板：
 
@@ -113,6 +113,12 @@ Copy-Item -LiteralPath '.\lib' -Destination $stcontextTarget -Recurse -Force
 采样支持 temperature、输出 token 上限、独立模型选择及模型提供的推理强度。尚未映射的采样参数列在兼容报告中。超限、未支持的脚本/宏/模型协议均报错，不自动截断、降级或切换模型。预设中的上下文容量不是模型能力保证。
 
 请求预览只在内存中保留最近三局，重启后清除；不持久化完整故事。导出请求会包含完整可见材料，请按自己的需要保存。
+
+## 发布打包
+
+给 `package.json` 中的版本打对应的 `v` 标签后，运行 `npm run package:release -- vX.Y.Z <输出目录>`。命令从对应 Git 提交生成可直接上传到 Tavern 的 ZIP，并输出版本、提交、文件字节数和 SHA-256。可用 `HEAD` 打包当前提交进行验证。发布时把生成的 ZIP 附到同名 GitHub Release。
+
+ZIP 包含插件入口、`lib/` 中的运行文件及许可证文件。保留 `package.json` 的包名和发行仓库地址，使 Tavern 在升级时继续识别同一个插件，并沿用已有插件数据。
 
 ## 验证
 
