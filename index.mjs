@@ -1,4 +1,5 @@
 import { createPresetStore } from './lib/store.mjs';
+import { registerWorkbench } from './lib/workbench.mjs';
 import { inspectPreset, digest } from './lib/preset.mjs';
 import { displayRegexes } from './lib/regex.mjs';
 import { createTurnMemory } from './lib/turn-memory.mjs';
@@ -17,11 +18,12 @@ const PROVIDER = 'st-context';
 export function apply(ctx) {
   const generateBody = createDshGeneration({ llm: ctx.llm, meter: ctx.get('tokenMeter'), protocolTransport: createProtocolTransport(ctx) });
   const store = createPresetStore(ctx.tavern), previews = new Map();
+  const workbenchReady = registerWorkbench(ctx, store);
   const memory = createTurnMemory(ctx.tavern);
   const projectsDisplay = ctx.tavern.capabilities?.bodyProjection === 1;
   const capable = () => ctx.tavern.capabilities?.bodyGeneration === 1 && typeof ctx.tavern.bodyGenerator === 'function';
   const handle = (key, callback) => ctx.tavern.handle(PREFIX + '/' + key, callback);
-  handle('config', async () => ({ ...(await store.list()), ...(await store.listHostPresets()), hostReady: capable(), generationReady: capable() }));
+  handle('config', async () => ({ ...(await store.list()), ...(await store.listHostPresets()), workbenchReady: workbenchReady(), hostReady: capable(), generationReady: capable() }));
   handle('body-generation-defaults', ({ mode, hostRegex } = {}) => {
     if (capable() && ctx.tavern.capabilities?.bodyGenerationDefaults === 1 && typeof ctx.tavern.bodyGenerationDefaults === 'function') {
       return ctx.tavern.bodyGenerationDefaults({ name: PROVIDER, mode, hostRegex });

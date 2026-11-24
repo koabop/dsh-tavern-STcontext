@@ -513,6 +513,7 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
                     ...sharedPresets.map(item => h('option', { key: item.id, value: 'host:' + item.id }, item.name))),
                   missingSharedPreset && h('option', { value: 'host:' + hostPreset, disabled: true }, '已选宿主预设不可用'))),
               hostPreset && h('p', { className: 'stc-muted' }, '宿主预设在 DSH Tavern 预设库中编辑，修改从下一次生成或重生成开始生效。'),
+              config?.workbenchReady && h('p', { className: 'stc-muted' }, '排查兼容问题：游玩页「更多 → 遇到问题？交给调试 Agent」，然后说“检查当前 STcontext 预设，先不要修改”。也可在卡片工作台直接指定预设。'),
               selected && h('div', { className: 'stc-row' }, badge((selected.summary?.enabledPrompts || 0) + ' 项提示词', 'neutral'), badge((selected.summary?.regexCount || 0) + ' 条正则', 'neutral')),
               config?.limits && h('p', { className: 'stc-muted', role: 'status' }, '存储已用 ' + formatBytes(config.storage.usedBytes) + ' / ' + formatBytes(config.limits.maxStoreBytes) + '，剩余 ' + formatBytes(config.storage.remainingBytes) + '（压缩后的预设与配置合计）'),
               config?.limits?.legacy && h('p', { className: 'stc-muted' }, '当前宿主未提供容量查询接口，使用旧版限制；升级宿主可导入更大的预设。'),

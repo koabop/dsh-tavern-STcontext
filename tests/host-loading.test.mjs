@@ -12,7 +12,7 @@ const enabled = process.env.DSH_BOOT_MODULE && process.env.STCONTEXT_HOST_REPO;
 for (const withMeter of [false, true]) {
   test(`DSH guard loads STcontext and imports presets (tokenMeter: ${withMeter})`, { skip: !enabled }, async t => {
     const host = file => import(pathToFileURL(resolve(process.env.STCONTEXT_HOST_REPO, file)).href);
-    const [{ Context }, { guardSource }, { createTavernPluginApi }] = await Promise.all([
+    const [{ Context }, { guardSource, runningUserPlugins }, { createTavernPluginApi }] = await Promise.all([
       import(new URL('../../cordis/lib/index.js', pathToFileURL(process.env.DSH_BOOT_MODULE))),
       host('tavern-plugin/lib/domain/user-plugins.js'),
       host('tavern-plugin/lib/plugin-api.js'),
@@ -22,14 +22,23 @@ for (const withMeter of [false, true]) {
     t.after(() => rm(dir, { recursive: true, force: true }));
     const ctx = new Context(), data = new Map();
     t.after(() => ctx.fiber.dispose());
-    const api = createTavernPluginApi({ ctx, pluginData: {
+    const skillRoots = new Set();
+    const api = createTavernPluginApi({ ctx, runningUserPlugins, addSkillRoot: ({ owner, dir }) => {
+      assert.equal(owner, plugin.name); skillRoots.add(dir); return () => skillRoots.delete(dir);
+    }, pluginData: {
       read: async owner => structuredClone(data.get(owner)),
       save: async (owner, value) => { data.set(owner, structuredClone(value)); },
     } });
     ctx.provide('tavern', api.service);
     ctx.provide('llm', { prepareCall() { assert.fail('loading/import must not request a model'); },
       listProviders: () => [{ id: 'configured' }], listModels: async () => [{ id: 'story' }] });
-    if (withMeter) ctx.provide('tokenMeter', { estimateMessage: () => 1 });
+    if (withMeter) {
+      ctx.provide('tokenMeter', { estimateMessage: () => 1 });
+      const { ToolsService } = await import(new URL('../../dsh-tools/lib/index.js', pathToFileURL(process.env.DSH_BOOT_MODULE)));
+      ctx.provide('systemPrompt', { tools() {} });
+      ctx.provide('agentPresets', { presetForSession: session => session.preset });
+      await ctx.plugin(ToolsService).await();
+    }
 
     const entry = join(dir, '.tavern-entry.mjs');
     await writeFile(entry, guardSource({ folder: plugin.name, name: plugin.name,
@@ -47,6 +56,21 @@ for (const withMeter of [false, true]) {
     await call('settings', { model });
     assert.equal((await call('models')).groups[0].models[0].id, 'story');
     const config = await call('config');
+    assert.equal(config.workbenchReady, withMeter);
+    if (withMeter) {
+      const agent = { session: { id: 'workbench', preset: 'tavern' } }, signal = new AbortController().signal;
+      const admitted = await ctx.tools.resolve({ agent, signal });
+      try {
+        const schemas = ctx.tools.schemas(agent, admitted).filter(tool => tool.name.startsWith('stcontext_'));
+        assert.equal(schemas.length, 4);
+        for (const { name } of schemas) {
+          assert.deepEqual(api.toolModesFor(name), ['card']); assert.ok(api.toolSkillsFor(name).includes('debug-card'));
+        }
+        const report = await admitted.view(agent).get('stcontext_inspect_preset').execute({ source: 'private', id: config.activeId }, { agent, signal });
+        assert.equal(report.report.blockerCount, 0);
+        assert.equal(skillRoots.size, 1);
+      } finally { admitted.dispose(); }
+    }
     assert.equal(config.presets.length, 1);
     assert.equal(config.hostReady, true);
     assert.equal(config.generationReady, true);
@@ -56,6 +80,11 @@ for (const withMeter of [false, true]) {
     assert.deepEqual((await api.bodyGenerators.list()).map(value => value.id), [plugin.name + ':st-context']);
 
     await fiber.dispose();
+    assert.equal(skillRoots.size, 0);
+    if (withMeter) {
+      assert.equal(api.toolModesFor('stcontext_inspect_preset'), null);
+      assert.equal(ctx.tools.definitions().some(tool => tool.name.startsWith('stcontext_')), false);
+    }
     await assert.rejects(call('config'), { code: 'TAVERN_PLUGIN_NOT_FOUND' });
     assert.deepEqual(await api.bodyGenerators.list(), []);
     fiber = ctx.plugin(guarded);
