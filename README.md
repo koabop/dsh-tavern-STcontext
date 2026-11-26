@@ -4,7 +4,7 @@
 
 ## 安装与使用
 
-STcontext v0.9.0 支持 Tavern 插件 API 7 及以上。生成正文还需要宿主提供 `capabilities.bodyGeneration === 1` 和 `bodyGenerator({ prepare, generate })`。更新实际使用的 Tavern Profile 后，请重启酒馆。[上游正文生成接口](https://github.com/flizzywine/dsh-tavern/commit/09620ebe)
+STcontext v0.10.0 支持 Tavern 插件 API 7 及以上。生成正文还需要宿主提供 `capabilities.bodyGeneration === 1` 和 `bodyGenerator({ prepare, generate })`。更新实际使用的 Tavern Profile 后，请重启酒馆。[上游正文生成接口](https://github.com/flizzywine/dsh-tavern/commit/09620ebe)
 
 使用附带 STcontext 的 Tavern 发行包时，在「设置 → DSH Tavern → 插件」启用 STcontext。首次随包安装默认停用，启用后仍可自行选择正文生成方式。已有同名安装的用户可以沿用原来的预设、模型和本局设置。
 
