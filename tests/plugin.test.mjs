@@ -113,7 +113,7 @@ function fixture(capability = 1, apiVersion = 7, sharedPresets = {}) {
     prepare: () => generator.prepare({ gameId: 'test', reason: 'normal', signal: new AbortController().signal }),
     generate: (response, config, input = materials, signal = new AbortController().signal) => {
       respond = response;
-      return generator.generate({ materials: structuredClone(input), config, signal });
+      return generator.generate({ materials: input, config, signal });
     },
   };
 }
@@ -123,6 +123,152 @@ async function importPreset(f, document = preset) {
   await f.call('upload/finish', { id });
   await f.call('settings', { model: { provider: 'fixture', model: 'story', reasoningEffort: 'high' } });
 }
+
+const damper = { slot: 'currentStateProjection', origin: 'plugin', plugin: 'dsh-tavern', name: 'narrative-damper', text: '冻结裁定 D {{user}}' };
+const dice = { slot: damper.slot, origin: 'plugin', plugin: 'dsh-tavern-fate-dice', name: 'tavern-plugin:dsh-tavern-fate-dice:fate-dice', text: '冻结骰面 F {{char}}' };
+const both = { injectNarrativeDamper: true, injectFateDice: true };
+async function rulingFixture(settings = both) {
+  let observer, read, invalidate;
+  const reads = [], frames = new Map();
+  const f = fixture(1, 8, { methods: {
+    turnSection(entry) { observer = entry.text; },
+    onTimelineChanged(callback) { invalidate = callback; },
+    async getRequestContext(args) { reads.push(args); return read ? read(args) : (frames.get(args.turn) ?? null); },
+    getTurnState() { assert.fail('the last written story turn is not a generation target'); },
+  } });
+  await importPreset(f); await f.call('settings', settings);
+  return { f, reads, frames, setRead(fn) { read = fn; }, invalidate() { invalidate({ gameId: 'test', kind: 'rollback' }); },
+    observe(turn, input = materials.input.raw, gameId = materials.gameId) { assert.equal(observer({ gameId, turn, input }), ''); },
+    async dispatch(config, dto = materials) {
+      let text;
+      await f.generate(request => { text = request.messages.flatMap(m => m.content).map(b => b.text).join('\n'); return { text: '正文' }; }, config, dto);
+      const preview = await f.call('request', { gameId: dto.gameId });
+      return { text, warnings: preview.report.warnings.filter(msg => /动态裁定|裁定段/.test(msg)) };
+    },
+  };
+}
+const frame = (turn, sections = [damper, dice]) => ({ turn, input: materials.input.text, sections });
+
+test('normal preparation binds only turn identity; the worker receives the two exact frozen source sections', async () => {
+  const h = await rulingFixture();
+  h.observe(8); // host invokes turnSection before prepare and saves the frame afterwards
+  const config = JSON.parse(JSON.stringify(await h.f.prepare()));
+  assert.equal(config.turnRulingBinding.turn, 8);
+  for (const raw of [materials.input.raw, materials.input.text, damper.text, dice.text]) assert.ok(!JSON.stringify(config).includes(raw));
+  const decoy = '【命运之骰】【叙事阻尼器】其他段绝不能进入发送副本';
+  h.frames.set(8, frame(8, [damper, dice, ...[
+    { ...dice, plugin: 'dsh-tavern-fate-dice-evil' }, { ...dice, name: 'fate-dice' },
+    { ...dice, origin: 'preset' }, { ...dice, slot: 'activeWorldbook' }, { ...damper, name: 'style-reference' },
+    { ...damper, plugin: 'dsh-tavern-narrative-damper' }, { ...damper, slot: 'writingRules' },
+  ].map(row => ({ ...row, text: decoy }))]));
+  await h.f.call('settings', { injectFateDice: false, injectNarrativeDamper: false });
+  const dto = Object.freeze({ ...materials, history: [...materials.history,
+    { role: 'user', text: materials.input.raw, turn: 8 }, { role: 'assistant', text: '', turn: 8, input: materials.input.raw, greeting: false }] });
+  const before = structuredClone(dto), sent = await h.dispatch(config, dto);
+  for (const raw of [damper.text, dice.text]) assert.equal(sent.text.split(raw).length - 1, 1);
+  assert.ok(!sent.text.includes(decoy)); assert.deepEqual(sent.warnings, []);
+  assert.deepEqual(dto, before);
+  assert.deepEqual(h.reads, Array(2).fill({ gameId: 'test', turn: 8 }));
+});
+
+test('a repeated input never selects the previous frame, a guessed +1, or a completed history turn', async () => {
+  const h = await rulingFixture();
+  h.observe(5); const first = await h.f.prepare(); h.frames.set(5, frame(5));
+  const prior = { ...materials, history: [...materials.history, { role: 'assistant', turn: 5, text: '已写完' }] };
+  for (const cfg of [first, await h.f.prepare()]) {
+    const miss = await h.dispatch(cfg, prior);
+    assert.ok(!miss.text.includes(dice.text)); assert.equal(miss.warnings.length, 1);
+  }
+  h.observe(5); assert.equal((await h.f.prepare()).turnRulingBinding, undefined); // already persisted before prepare
+  h.observe(11); const second = await h.f.prepare();
+  h.frames.set(11, frame(11, [{ ...dice, text: '另一轮的骰面' }]));
+  const hit = await h.dispatch(second, prior);
+  assert.ok(hit.text.includes('另一轮的骰面')); assert.ok(!hit.text.includes(dice.text));
+  assert.deepEqual(h.reads.map(r => r.turn), [5, 5, 11, 11]);
+});
+
+test('switching after several native turns binds the new turn; genuine overlaps and timeline changes invalidate it', async () => {
+  const h = await rulingFixture();
+  for (const nativeTurn of [3, 4, 8]) { h.observe(nativeTurn); h.frames.set(nativeTurn, frame(nativeTurn)); }
+  h.observe(12); const normal = await h.f.prepare(); h.frames.set(12, frame(12));
+  assert.ok((await h.dispatch(normal)).text.includes(dice.text));
+  assert.deepEqual(h.reads.map(({ turn }) => turn), [8, 12, 12]);
+  // The same raw/projected input and visible prior floors are no proof after a rollback.
+  h.invalidate(); assert.equal((await h.dispatch(normal)).warnings.length, 1);
+  h.observe(15); h.observe(16); // 15 never landed
+  assert.equal((await h.f.prepare()).turnRulingBinding, undefined);
+  h.observe(22); h.observe(22); assert.equal((await h.f.prepare()).turnRulingBinding, undefined);
+  h.observe(24); h.setRead(() => { h.invalidate(); return null; });
+  assert.equal((await h.f.prepare()).turnRulingBinding, undefined);
+});
+
+test('a frozen config without its live ticket cannot select a reused turn after reload or eviction', async () => {
+  const original = await rulingFixture(); original.observe(8);
+  const frozen = JSON.parse(JSON.stringify(await original.f.prepare()));
+  const reloaded = await rulingFixture();
+  for (let i = 0; i < 64; i++) original.observe(1, '其他输入', 'another-game-' + i);
+  for (const h of [original, reloaded]) {
+    h.frames.set(8, frame(8)); const before = h.reads.length;
+    const sent = await h.dispatch(frozen);
+    assert.equal(sent.warnings.length, 1); assert.ok(!sent.text.includes(dice.text));
+    assert.equal(h.reads.length, before);
+  }
+});
+
+test('normal checks game, raw and projected inputs and returned turn; empty differs from ambiguous', async () => {
+  const h = await rulingFixture(); h.observe(8); const config = await h.f.prepare();
+  for (const [snapshot, dto] of [
+    [null, materials], [frame(9), materials], [{ ...frame(8), input: materials.input.raw }, materials],
+    [frame(8), { ...materials, gameId: 'other' }], [frame(8), { ...materials, input: { ...materials.input, raw: '不同原始输入' } }],
+  ]) {
+    h.frames.set(8, snapshot); const miss = await h.dispatch(config, dto);
+    assert.ok(!miss.text.includes(damper.text)); assert.equal(miss.warnings.length, 1);
+  }
+  h.frames.set(8, frame(8, [])); assert.deepEqual((await h.dispatch(config)).warnings, []);
+  h.frames.set(8, frame(8, [damper, dice, { ...dice, text: '歧义骰面' }]));
+  const ambiguous = await h.dispatch(config);
+  assert.ok(ambiguous.text.includes(damper.text) && !ambiguous.text.includes(dice.text) && !ambiguous.text.includes('歧义骰面'));
+  assert.equal(ambiguous.warnings.length, 1);
+  h.frames.set(8, frame(8, [{ text: '【命运之骰】不能按标题恢复' }]));
+  const oldShape = await h.dispatch(config);
+  assert.ok(!oldShape.text.includes('不能按标题恢复')); assert.equal(oldShape.warnings.length, 1);
+});
+
+test('no context reads with disabled switches or an ambiguous replacement; an old host still sends', async () => {
+  const h = await rulingFixture({}); h.observe(6); const disabled = await h.f.prepare();
+  assert.equal(disabled.turnRulingBinding, undefined);
+  assert.deepEqual((await h.dispatch(disabled)).warnings, []); assert.deepEqual(h.reads, []);
+  await h.f.call('settings', { injectFateDice: true }); h.observe(8); const normal = await h.f.prepare(); h.frames.set(8, frame(8));
+  const hit = await h.dispatch(normal); assert.ok(hit.text.includes(dice.text) && !hit.text.includes(damper.text));
+  for (const reason of ['retry', 'regenerate']) {
+    h.observe(8);
+    const fresh = await h.f.generator.prepare({ reason, gameId: materials.gameId, signal: new AbortController().signal });
+    for (const cfg of [normal, fresh]) { // a matching old normal snapshot isn't a replacement target
+      const miss = await h.dispatch(cfg, { ...materials, reason, operationId: 'attempt:turn:8' });
+      assert.ok(!miss.text.includes(dice.text)); assert.equal(miss.warnings.length, 1);
+    }
+  }
+  assert.equal(h.reads.length, 2);
+  const old = fixture(); await importPreset(old); await old.call('settings', both);
+  assert.equal((await old.generate(() => ({ text: '可用' }), await old.prepare())).text, '可用');
+  assert.ok((await old.call('request', { gameId: 'test' })).report.warnings.some(s => s.includes('动态裁定')));
+});
+
+test('frame read failure degrades to a preview warning; cancellation interrupts outstanding frame reads', async () => {
+  const h = await rulingFixture(); h.observe(8); const cfg = await h.f.prepare();
+  h.setRead(() => { throw Error('宿主暂时不可读'); });
+  assert.equal((await h.dispatch(cfg)).warnings.length, 1);
+  for (const step of ['generate', 'prepare']) {
+    const controller = new AbortController();
+    let reading; const called = new Promise(resolve => { reading = resolve; });
+    h.setRead(() => { reading(); return new Promise(() => {}); });
+    if (step === 'prepare') h.observe(9);
+    const task = step === 'prepare' ? h.f.generator.prepare({ reason: 'normal', gameId: 'test', signal: controller.signal })
+      : h.f.generate(() => assert.fail('no dispatch'), cfg, materials, controller.signal);
+    await called; controller.abort(new Error('取消宿主读取'));
+    await assert.rejects(task, /取消宿主读取/);
+  }
+});
 
 test('upstream API 7 registers once, imports, and freezes configuration without a model request', async () => {
   const f = fixture();

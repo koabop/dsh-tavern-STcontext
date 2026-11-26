@@ -482,6 +482,39 @@ test('preset import keeps unsaved model and persona edits and saving preserves h
   } finally { h.destroy(); }
 });
 
+test('injection checkboxes share the settings draft, save and reload in every panel', async () => {
+  const model = { provider: 'own', model: 'story', reasoningEffort: 'high' };
+  let saved = { model, temperature: .7, personaDescription: '旅行者' };
+  const damper = '注入叙事阻尼器', dice = '注入命运之骰';
+  // Each new panel starts from the preceding panel's saved settings (initially a legacy config).
+  for (const [surface, label, key, enabled] of [
+    [false, damper, 'injectNarrativeDamper', true], [true, dice, 'injectFateDice', true],
+    ['settings', damper, 'injectNarrativeDamper', false], [false, dice, 'injectFateDice', false],
+  ]) {
+    const h = harness({ initialSettings: saved });
+    try {
+      await h.mount(surface);
+      assert.equal(h.checkbox(damper).checked, saved.injectNarrativeDamper === true);
+      assert.equal(h.checkbox(dice).checked, saved.injectFateDice === true);
+      assert.doesNotMatch(h.text(), /有未保存的更改/);
+      await h.field(label, enabled);
+      assert.match(h.text(), /有未保存的更改/);
+      await h.field(label, !enabled);
+      assert.doesNotMatch(h.text(), /有未保存的更改/);
+      await h.field(label, enabled);
+      assert.deepEqual(h.saved.settings, saved);
+      assert.equal(h.calls.some(call => call.name === 'settings'), false);
+      await h.click('保存设置');
+      const expected = { ...saved };
+      if (enabled) expected[key] = true; else delete expected[key];
+      saved = h.saved.settings;
+      assert.deepEqual(saved, expected);
+      assert.match(h.text(), /设置已保存/);
+      assert.doesNotMatch(h.text(), /有未保存的更改/);
+    } finally { h.destroy(); }
+  }
+});
+
 for (const surface of [false, true, 'settings']) {
   test(`player persona can be loaded, saved and cleared in the ${surface || 'sidebar'} panel`, async () => {
     const h = harness({ initialSettings: { personaDescription: '已保存的玩家设定' } });

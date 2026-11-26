@@ -15,8 +15,38 @@ export const hostRules = {
   card: { id: 'card', placement: [2], findRegex: '/PRESET/g', replaceString: 'DISPLAY', markdownOnly: true },
 };
 
-export async function runHostGeneration({ mode, presetText, stream, userText = '继续', hostRepo = process.env.STCONTEXT_HOST_REPO }) {
-  const host = path => import(pathToFileURL(resolve(hostRepo, 'tavern-plugin/lib', path)).href);
+export const hostModule = (path, repo = process.env.STCONTEXT_HOST_REPO) => import(pathToFileURL(resolve(repo, 'tavern-plugin/lib', path)).href);
+
+// Only the two verdicts are canned. The host owns the registration names,
+// ordering, foreground slots and branch-aware getRequestContext lookup.
+async function createRulingFixture(host, store, rulings) {
+  const [{ createTavernPluginApi }, { foregroundRequestContext }] = await Promise.all([host('plugin-api.js'), host('domain/agent-input-frame.js')]);
+  const api = createTavernPluginApi({ loaderOrigin: () => 'host',
+    resolveGame: async id => id === 'session' ? { sessionId: id, chatId: 'chat' } : null,
+    readRequestContext: async (id, turn) => foregroundRequestContext(await store.chatForSession(id), turn),
+  });
+  // The Cordis service proxy normally supplies the caller's fiber identity.
+  const serviceFor = name => Object.assign(Object.create(api.service), { ctx: { fiber: { name } } });
+  serviceFor('dsh-tavern-fate-dice').turnSection({ name: 'fate-dice', position: 'after', text: ({ turn }) => rulings[turn]?.dice || '' });
+  const service = serviceFor('dsh-tavern-STcontext');
+  return {
+    tavern: { turnSection: service.turnSection.bind(service), getRequestContext: service.getRequestContext.bind(service) },
+    turnOptions: {
+      async pluginTurnContext(input) {
+        const sections = await api.turnContext(input);
+        // projectPluginTurnContext in the host adds this built-in section *after*
+        // plugin callbacks, with a bare name, not a turnSection registration.
+        const damper = rulings[input.turn]?.damper;
+        if (damper) sections.push({ owner: 'dsh-tavern', name: 'narrative-damper', position: 'last', text: damper.rulingText });
+        return sections;
+      },
+      activeDamperRuling: (_chatId, turn) => rulings[turn]?.damper,
+    },
+  };
+}
+
+export async function runHostGeneration({ mode, presetText, stream, userText = '继续', hostRepo = process.env.STCONTEXT_HOST_REPO, settings = {}, rulings }) {
+  const host = path => hostModule(path, hostRepo);
   const [{ createTurnOrchestrator }, { createStoryTimeline }, { createForegroundFrameBuilder },
     { createPluginBodyGeneration }, { createBodyGenerationProviders }, { projectReplyLayers, projectReplyHistory },
     { publicBodyMaterials },
@@ -41,17 +71,18 @@ export async function runHostGeneration({ mode, presetText, stream, userText = '
     async writeChat(next) { state = { ...copy(next), _storageRevision: state._storageRevision + 1 }; revisions.set(state._storageRevision, copy(state)); return copy(state); },
     async updateChat(id, callback) { const next = await callback(copy(state)); if (next) await this.writeChat(next); return copy(state); },
   };
+  const rulingFixture = rulings ? await createRulingFixture(host, store, rulings) : {};
   const providers = createBodyGenerationProviders({ allowed: async () => true });
   const generation = createPluginBodyGeneration({ chatForSession: store.chatForSession,
     updateChat: store.updateChat.bind(store), readRevision: async (id, rev) => copy(revisions.get(rev)), providers,
     settings: async () => ({ storyGenerationMode: mode, storyGenerationProvider: 'dsh-tavern-STcontext:st-context', storyPluginOutputRegex: true }) });
-  const turns = createTurnOrchestrator({ store, timeline: createStoryTimeline(), frameBuilder: createForegroundFrameBuilder(),
+  const turns = createTurnOrchestrator({ store, ...rulingFixture.turnOptions, timeline: createStoryTimeline(), frameBuilder: createForegroundFrameBuilder(),
     bodyGeneration: () => generation.route('session'), prepareBodyGeneration: () => generation.prepare('session'),
     planner: { plan: async () => ({ text: '写作要求' }) }, projectReply: projectReplyLayers,
     resolvePresetRegexScripts: async () => [presetRule, overriddenRule, contextRule] });
   let pluginData;
   const handlers = new Map();
-  apply({ get: () => undefined, tavern: { capabilities: { bodyGeneration: 1, bodyProjection: 1 }, handle: (name, callback) => handlers.set(name, callback),
+  apply({ get: () => undefined, tavern: { ...rulingFixture.tavern, capabilities: { bodyGeneration: 1, bodyProjection: 1 }, handle: (name, callback) => handlers.set(name, callback),
     getPluginDataLimits: () => ({ maxBytes: 256 * 1024 * 1024 }),
     readPluginData: async () => copy(pluginData), savePluginData: async ({ data }) => { pluginData = copy(data); },
     bodyGenerator: entry => providers.register('dsh-tavern-STcontext', entry) },
@@ -64,17 +95,27 @@ export async function runHostGeneration({ mode, presetText, stream, userText = '
   const { id } = await call('upload/begin', { name: 'test.json', size: presetText.length });
   for (let index = 0, offset = 0; offset < presetText.length; index++, offset += 50000) await call('upload/chunk', { id, index, text: presetText.slice(offset, offset + 50000) });
   await call('upload/finish', { id });
-  await call('settings', { model: { provider: 'independent', model: 'plugin-story' } });
-  await turns.prepare({ sessionId: 'session', turn: 2, userText, requestId: 'r' });
+  await call('settings', { ...settings, model: { provider: 'independent', model: 'plugin-story' } });
+  let turn = 1;
+  const nextTurn = async text => {
+    const result = await playTurn({ turn: ++turn, userText: text, mode, turns, call, store, generation, createForegroundHandoff, registerTurnLifecycleHooks });
+    return { ...result, saved: state.messages.at(-1) };
+  };
+  return { ...(await nextTurn(userText)), nextTurn, call, supportsHostRegex, projectReplyHistory, state: () => state };
+}
+
+async function playTurn({ turn, userText, mode, turns, call, store, generation, createForegroundHandoff, registerTurnLifecycleHooks }) {
+  const requestId = `r${turn}`;
+  await turns.prepare({ sessionId: 'session', turn, userText, requestId });
   // Settings changed after preparation must not change this operation's model.
   await call('settings', { model: { provider: 'later', model: 'next-turn' } });
-  const session = { id: 'session', events: [{ type: 'turn/start', data: { turn: 2 } }] };
+  const session = { id: 'session', events: [{ type: 'turn/start', data: { turn } }] };
   if (mode === 'plugin-tool-call') {
     for (const [callId, name, text] of [['lookup', 'worldbook_search', '本轮查询补充'], ['read', 'read', '不可传入的读取结果']]) {
       session.events.push(
-        { type: 'assistant/message', data: { turn: 2, message: { source: { kind: 'model' }, content: [{ type: 'tool-call', id: callId, name, arguments: '{}' }] } } },
-        { type: 'tool/call', data: { turn: 2, callId, name, arguments: '{}' } },
-        { type: 'tool/result', data: { turn: 2, message: { role: 'tool', toolCallId: callId, content: [{ type: 'text', text }] } } });
+        { type: 'assistant/message', data: { turn, message: { source: { kind: 'model' }, content: [{ type: 'tool-call', id: callId, name, arguments: '{}' }] } } },
+        { type: 'tool/call', data: { turn, callId, name, arguments: '{}' } },
+        { type: 'tool/result', data: { turn, message: { role: 'tool', toolCallId: callId, content: [{ type: 'text', text }] } } });
     }
   }
   const direct = await generation.direct(session, new AbortController().signal);
@@ -86,22 +127,21 @@ export async function runHostGeneration({ mode, presetText, stream, userText = '
   const receipt = await generation.tool.execute({}, { agent: { session }, signal: new AbortController().signal, concludeTurn() { concludes++; } });
   const reused = await generation.tool.execute({}, { agent: { session }, signal: new AbortController().signal, concludeTurn() {} });
   assert.equal(reused, receipt);
-  session.events.push({ type: 'assistant/message', data: { turn: 2, step: 1, message: { id: 'model', source: { kind: 'model' }, content: [
+  session.events.push({ type: 'assistant/message', data: { turn, step: 1, message: { id: 'model', source: { kind: 'model' }, content: [
     { type: 'tool-call', id: 'body', name: 'tavern_generate_body', arguments: '{}' }] } } },
-    { type: 'tool/call', data: { turn: 2, callId: 'body', name: 'tavern_generate_body', arguments: '{}' } },
-    { type: 'tool/result', data: { turn: 2, message: { role: 'tool', toolCallId: 'body', content: [{ type: 'text', text: receipt }] } } });
+    { type: 'tool/call', data: { turn, callId: 'body', name: 'tavern_generate_body', arguments: '{}' } },
+    { type: 'tool/result', data: { turn, message: { role: 'tool', toolCallId: 'body', content: [{ type: 'text', text: receipt }] } } });
   const hooks = new Map(), pending = []; let settlements = 0, projected;
   const handoff = createForegroundHandoff({ turns, store, tasks: { activity: chat => ({ role: 'settlement', phase: chat.settleStatus }) },
     queueBackground: async () => { settlements++; }, defer: callback => pending.push(callback) });
   registerTurnLifecycleHooks({ ctx: { on: (name, callback) => hooks.set(name, callback) }, pluginBodyGeneration: generation,
     clearRuntimePresetRequestState() {}, backgroundAgentRunner: { owns: () => false },
     userMessageForTurn: () => ({ role: 'user', content: [{ type: 'text', text: userText }] }), contentText: () => userText,
-    requestIdForTurn: () => 'r', turnOrchestrator: turns, foregroundHandoff: handoff,
+    requestIdForTurn: () => requestId, turnOrchestrator: turns, foregroundHandoff: handoff,
     replaceAssistantReply(_session, _result, text) { projected = text; } });
-  await hooks.get('agent/turn-stopping')({ agent: { session }, turn: 2 });
-  handoff.end({ sessionId: 'session', turn: 2, reason: 'completed' });
+  await hooks.get('agent/turn-stopping')({ agent: { session }, turn });
+  handoff.end({ sessionId: 'session', turn, reason: 'completed' });
   for (const work of pending) work();
   await new Promise(resolve => setImmediate(resolve));
-  return { call, receipt, concludes, settlements, projected, supportsHostRegex, projectReplyHistory,
-    state: () => state, saved: state.messages.at(-1) };
+  return { receipt, concludes, settlements, projected };
 }

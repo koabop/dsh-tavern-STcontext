@@ -36,6 +36,40 @@ test('player persona persists verbatim, survives unrelated saves and clears with
     assert.deepEqual((await reloaded.list()).settings, { maxTokens: 2048, temperature: .7 });
   }
 });
+
+test('injection choices default off in legacy settings and persist independently across reloads', async () => {
+  const tavern = fakeTavern(), store = createPresetStore(tavern);
+  assert.deepEqual((await store.list()).settings, {});
+  const original = { model: { provider: 'own', model: 'story', reasoningEffort: 'high' }, temperature: .6, maxTokens: 2048, personaDescription: '旅行者' };
+  await tavern.savePluginData({ data: { schemaVersion: 1, presets: [], activeId: null, settings: original } });
+  await upload(store, JSON.stringify(document));
+  assert.deepEqual((await store.active()).settings, original);
+  for (const [patch, enabled] of [
+    [{ injectNarrativeDamper: true }, { injectNarrativeDamper: true }],
+    [{ injectFateDice: true }, { injectNarrativeDamper: true, injectFateDice: true }],
+    [{ injectNarrativeDamper: false }, { injectFateDice: true }],
+    [{ temperature: .6 }, { injectFateDice: true }], // A stale client saves without the new keys.
+    [{ injectFateDice: null }, {}],
+  ]) {
+    const expected = { ...original, ...enabled };
+    assert.deepEqual((await store.settings(patch)).settings, expected);
+    assert.deepEqual((await tavern.readPluginData()).settings, expected);
+    assert.deepEqual((await createPresetStore(tavern).active()).settings, expected);
+  }
+});
+
+test('invalid injection choices reject the entire settings patch without coercion', async () => {
+  const tavern = fakeTavern(), store = createPresetStore(tavern);
+  await store.settings({ injectNarrativeDamper: true, injectFateDice: true, personaDescription: '原设定' });
+  const before = await tavern.readPluginData();
+  for (const key of ['injectNarrativeDamper', 'injectFateDice']) {
+    for (const invalid of ['true', 'false', '', 0, 1, undefined, {}, []]) {
+      await assert.rejects(store.settings({ injectNarrativeDamper: false, injectFateDice: false, [key]: invalid, personaDescription: '不应保存' }), new RegExp(key));
+      assert.deepEqual(await tavern.readPluginData(), before);
+    }
+  }
+});
+
 async function readAll(store, id, first, kind = 'read') {
   let info = first || await store[kind]({ id }), text = info.text;
   while (text.length < info.total) {

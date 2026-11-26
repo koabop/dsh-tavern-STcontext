@@ -3,6 +3,7 @@ import { registerWorkbench } from './lib/workbench.mjs';
 import { inspectPreset, digest } from './lib/preset.mjs';
 import { displayRegexes } from './lib/regex.mjs';
 import { createTurnMemory } from './lib/turn-memory.mjs';
+import { createTurnRulings } from './lib/turn-rulings.mjs';
 import { runCompiler } from './lib/worker-client.mjs';
 import { createDshGeneration, selectGenerationModel } from './lib/generation.mjs';
 import { listGenerationModels, readGenerationModelReasoning } from './lib/models.mjs';
@@ -22,6 +23,7 @@ export function apply(ctx) {
   const memory = createTurnMemory(ctx.tavern);
   const projectsDisplay = ctx.tavern.capabilities?.bodyProjection === 1;
   const capable = () => ctx.tavern.capabilities?.bodyGeneration === 1 && typeof ctx.tavern.bodyGenerator === 'function';
+  const rulings = capable() && createTurnRulings(ctx.tavern);
   const handle = (key, callback) => ctx.tavern.handle(PREFIX + '/' + key, callback);
   handle('config', async () => ({ ...(await store.list()), ...(await store.listHostPresets()), workbenchReady: workbenchReady(), hostReady: capable(), generationReady: capable() }));
   handle('body-generation-defaults', ({ mode, hostRegex } = {}) => {
@@ -51,13 +53,16 @@ export function apply(ctx) {
   });
   if (typeof ctx.tavern.onGameRemoved === 'function') ctx.tavern.onGameRemoved(({ gameId }) => previews.delete(gameId));
   async function prepare({ gameId, signal, reason }) {
+    const observation = rulings.take(gameId);
     signal?.throwIfAborted();
     const active = await store.active({ gameId });
     signal?.throwIfAborted();
     const report = inspectPreset(active.document, { ...active.settings, trigger: reason === 'normal' ? 'normal' : 'regenerate' });
     if (report.blockers.length) throw new Error(report.blockers.join('；'));
     selectGenerationModel(active.settings.model);
-    return freezeGenerationConfig(active);
+    const binding = await rulings.bind(observation, active.settings, reason, signal);
+    signal?.throwIfAborted();
+    return freezeGenerationConfig(active, binding);
   }
   async function generate({ materials, config, signal }) {
     signal?.throwIfAborted();
@@ -65,6 +70,9 @@ export function apply(ctx) {
     if (!active?.document || !active?.settings) throw new Error('宿主未提供冻结的预设配置，请重新生成本轮');
     selectGenerationModel(active.settings.model);
     const input = compilerMaterials(materials);
+    const { turnRulings, warning: rulingWarning } = await rulings.collect(materials, active, signal);
+    if (turnRulings) input.turnRulings = turnRulings;
+    signal?.throwIfAborted();
     const memoryWarnings = await memory.restore(input, digest(active.document), signal);
     const compiled = await runCompiler('compile', { document: active.document, materials: input, settings: active.settings }, { signal });
     const report = { ...compiled.report, preset: active.name, presetDigest: compiled.presetDigest, historyMessages: compiled.historyMessages,
@@ -72,6 +80,7 @@ export function apply(ctx) {
       ...(typeof materials.outputProcessing?.hostRegex === 'boolean'
         ? { outputProcessing: { hostRegex: materials.outputProcessing.hostRegex } } : {}) };
     report.warnings.push(...memoryWarnings);
+    if (rulingWarning) report.warnings.push(rulingWarning);
     if (!projectsDisplay) report.warnings.push('宿主缺少正文双通道接口，聊天将显示未美化的消息源文。');
     if (compiled.scriptState && !memory.available) report.warnings.push('宿主缺少版本化楼层存储，当前预设的聊天脚本状态仅在本轮有效。');
     const preview = () => JSON.stringify({ report, logicalMessages: compiled.logicalMessages, request: compiled.request }, null, 2);

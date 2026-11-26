@@ -7,7 +7,12 @@ window.__ModuleLoader__.load({
       inject: ['tavernUi', 'slots'],
       apply(ctx) {
         const ui = ctx.tavernUi, call = (name, args = {}) => ui.callHost('dsh-tavern-stcontext/' + name, args);
-        const editableSettings = value => ({ model: value?.model || null, personaDescription: value?.personaDescription || '' });
+        const editableSettings = value => ({
+          model: value?.model || null, personaDescription: value?.personaDescription || '',
+          injectNarrativeDamper: value?.injectNarrativeDamper === true, injectFateDice: value?.injectFateDice === true,
+        });
+        const check = (label, checked, onChange, disabled = false) => h('label', { className: 'stc-check' },
+          h('input', { type: 'checkbox', 'aria-label': label, checked, disabled, onChange: event => onChange(event.target.checked) }), label);
         const formatBytes = bytes => {
           const unit = bytes >= 1024 * 1024 ? 1024 * 1024 : 1024;
           return Number((bytes / unit).toFixed(2)) + (unit === 1024 ? ' KiB' : ' MiB');
@@ -305,8 +310,6 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
               h(options.multiline ? 'textarea' : 'input', { className: 'stc-select' + (options.code ? ' stc-code' : ''), 'aria-label': label,
                 value: value ?? '', onChange: event => onChange(event.target.value), spellCheck: !options.code,
                 ...Object.fromEntries(Object.entries(options).filter(([key]) => !['multiline', 'code'].includes(key))) }));
-            const check = (label, checked, onChange, disabled = false) => h('label', { className: 'stc-check' },
-              h('input', { type: 'checkbox', 'aria-label': label, checked, disabled, onChange: event => onChange(event.target.checked) }), label);
             const select = (label, value, options, onChange, disabled = false) => h('label', { className: 'stc-field' }, label,
               h('select', { className: 'stc-select', 'aria-label': label, value, disabled, onChange: event => onChange(event.target.value) },
                 ...options.map(([id, name]) => h('option', { key: id, value: id }, name))));
@@ -553,6 +556,10 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
                   placeholder: '填写你扮演的玩家的身份、外貌、性格、背景等',
                   onChange: event => setSettings({ ...settings, personaDescription: event.target.value }) })),
               h('p', { className: 'stc-muted' }, '保存后按原文填入 Persona Description；留空不额外添加。预设未启用该占位项时会自动补入，宿主原有玩家材料仍保留。'),
+              h('div', { className: 'stc-row', role: 'group', 'aria-label': '宿主机制注入' },
+                check('注入叙事阻尼器', settings.injectNarrativeDamper === true, checked => setSettings({ ...settings, injectNarrativeDamper: checked }), busy || !config),
+                check('注入命运之骰', settings.injectFateDice === true, checked => setSettings({ ...settings, injectFateDice: checked }), busy || !config)),
+              h('p', { className: 'stc-muted' }, '勾选并保存后，世界书（WorldInfo）会包含对应机制的常驻说明。能确认是本轮的结果才会附在玩家输入末尾。这不会启停宿主机制，也不会重掷。'),
               h('div', { className: 'stc-card-footer stc-row stc-between' }, h('span', { className: 'stc-muted', role: 'status' }, settingsDirty ? '有未保存的更改' : '设置对所有会话生效'),
                 h('button', { className: 'stc-button', disabled: busy || !config || reasoningLoading, onClick: () => act(async () => { await saveSettings(); setNotice('设置已保存'); }) }, '保存设置')))),
             manageDefaults && h('section', { className: 'stc-card stc-config-card stc-generation', 'aria-label': '正文生成默认设置' },
@@ -574,7 +581,7 @@ body[data-ds-dark-theme] .stc-panel{--stc-surface:var(--dsw-specific-input-major
               h('h3', null, '正文生成'),
               h('p', { className: 'stc-muted' }, '先保存预设与模型设置，再从侧栏「＋ → 插件 → STcontext」设置默认生成方式。本局设置可以覆盖默认值。'),
               h('p', { className: 'stc-muted' }, '使用宿主的发送、重生成、失败重试和停止按钮。生成进度及错误由宿主显示；提交后结算失败时，在宿主中重试结算。'),
-              h('p', { className: 'stc-muted' }, '预设、模型与玩家设定在操作开始时冻结；生成途中保存更改只影响下一次操作。'),
+              h('p', { className: 'stc-muted' }, '预设、模型、玩家设定与注入选项在操作开始时冻结；之后保存更改不会改写已冻结的操作。'),
               gameId ? h('div', { className: 'stc-actions' },
                 h('button', { className: 'stc-button stc-quiet', disabled: working, onClick: () => act(readRequest) }, '查看本次请求'))
                 : h('p', { className: 'stc-muted' }, '打开游戏后，通过侧栏「＋ → STcontext」或输入框上方的「STcontext」查看本次请求。')),
